@@ -308,19 +308,18 @@ one live call to confirm the real API is reachable. **Expected:** `RESULT:
 PASS`. It does not drive the GUI dialogs or actually install anything — that
 stays manual, per above.
 
-> **Verified on this branch:** the only published release at the time of
-> testing, `v1.0.9`, carries **only a `.dmg` asset — no `.exe`**, and the local
-> `viewer/__init__.py __version__` is also `1.0.9`. That means today, for real
-> users: (a) **Check for Updates → up to date** works correctly out of the box
-> (versions match, real API, no mocking needed), and (b) the **"no asset for
-> this OS" graceful path is exactly what's live in production right now** — a
-> Windows user on an older version who checks for updates would hit "Could not
-> download the update. Try the releases page on GitHub," not a working install,
-> because no Windows release has ever shipped a `.exe` asset. The success path
-> (download → quit → install → relaunch) has never been exercised end-to-end
-> and needs a real published release with a Windows asset attached to test —
-> that's a visible/shared action (publishing to the public repo), so it wasn't
-> done as part of this pass without separate sign-off.
+> **Verified on this branch, then fixed:** at first pass, the only published
+> release, `v1.0.9`, carried **only a `.dmg` asset — no `.exe`**, so the "no
+> asset for this OS" graceful path was what real Windows users would actually
+> hit. Since this is currently a single-user/local install (no other consumers
+> to worry about provenance for), `LINQS-Layout-Setup-1.0.9.exe` (built from
+> this branch, including the `installer.iss` per-user-only fix above) was
+> uploaded directly to the existing `v1.0.9` release via `gh release upload`.
+> `viewer.update._fetch_latest()` now correctly resolves a `.exe` asset URL for
+> `v1.0.9`. The local `viewer/__init__.py __version__` is also `1.0.9`, so
+> **Check for Updates → up to date** is the path that actually exercises now;
+> the download → quit → install → relaunch success path still needs a genuinely
+> *newer* published version to test end-to-end.
 
 ---
 
