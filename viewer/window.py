@@ -166,8 +166,8 @@ class MainWindow(QMainWindow):
             ("G", "toggle grid"),
             ("B", "light / dark"),
             ("esc", "clear measurement"),
-            ("⌘O", "open file"),
-            ("⌘W", "close tab"),
+            (style.key_label("O"), "open file"),
+            (style.key_label("W"), "close tab"),
         ]
         w = max(len(k) for k, _ in rows)
         text = "\n".join(f"{k.ljust(w)}    {v}" for k, v in rows)
@@ -218,7 +218,7 @@ class WelcomeWindow(QMainWindow):
         v = QVBoxLayout(central)
         v.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        hint = QLabel("Press  ⌘O  to open a DXF file")
+        hint = QLabel(f"Press  {style.key_label('O')}  to open a DXF file")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint.setStyleSheet("color: white; font-size: 20px;")
         v.addWidget(hint)

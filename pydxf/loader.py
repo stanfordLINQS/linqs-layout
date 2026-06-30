@@ -35,12 +35,19 @@ def _libname() -> str:
     return "libdxfcore.so"
 
 
+def _build_hint() -> str:
+    """The command to (re)build the native core on this OS."""
+    if sys.platform.startswith("win"):
+        return f"{os.path.join(_LIB_DIR, 'build.bat')}   (from a VS Native Tools prompt)"
+    return f"bash {os.path.join(_LIB_DIR, 'build.sh')}"
+
+
 def _load_lib() -> ctypes.CDLL:
     path = os.path.join(_LIB_DIR, _libname())
     if not os.path.exists(path):
         raise FileNotFoundError(
             f"DXF core library not found at {path}.\n"
-            f"Build it first:  bash {os.path.join(_LIB_DIR, 'build.sh')}"
+            f"Build it first:  {_build_hint()}"
         )
     lib = ctypes.CDLL(path)
 

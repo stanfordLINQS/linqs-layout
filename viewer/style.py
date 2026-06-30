@@ -7,6 +7,8 @@ cues. The layout geometry is the only saturated color in the window.
 
 from __future__ import annotations
 
+import sys
+
 from PySide6.QtGui import QColor
 
 # -- tokens (0-255 RGB) ------------------------------------------------------
@@ -17,13 +19,32 @@ DIM = (70, 70, 78)          # disabled / hidden
 HAIR = (42, 42, 48)         # 1px hairline rules
 ACCENT = (255, 176, 0)      # #ffb000   amber — the single interactive accent
 
-# Use Menlo (always present on macOS). Avoid naming "SF Mono" — Qt can't resolve it
-# by family name there, which logs a warning and pays an alias-populate cost.
-MONO = "Menlo, monospace"
-MONO_FAMILY = "Menlo"       # concrete family for QFont
+# One monospace face, picked per-OS from fonts that ship by default so we never
+# pay a missing-family warning / alias-populate cost:
+#   macOS   -> Menlo (avoid "SF Mono"; Qt can't resolve it by family name there)
+#   Windows -> Consolas
+#   Linux   -> DejaVu Sans Mono
+# MONO is the CSS font-family stack (with a generic fallback); MONO_FAMILY is the
+# single concrete family for QFont(...) construction.
+if sys.platform == "darwin":
+    MONO_FAMILY = "Menlo"
+elif sys.platform.startswith("win"):
+    MONO_FAMILY = "Consolas"
+else:
+    MONO_FAMILY = "DejaVu Sans Mono"
+MONO = f"{MONO_FAMILY}, monospace"
 
 # GL clear color (0-1 floats), kept in sync with the canvas token.
 CANVAS_GL = tuple(c / 255.0 for c in CANVAS)
+
+# Primary-modifier label for help/hint TEXT only (the real shortcuts use
+# QKeySequence.StandardKey, which already maps to Ctrl on Windows/Linux).
+PRIMARY_MOD = "⌘" if sys.platform == "darwin" else "Ctrl+"
+
+
+def key_label(letter: str) -> str:
+    """Display string for a primary-modifier shortcut, e.g. '⌘O' / 'Ctrl+O'."""
+    return f"{PRIMARY_MOD}{letter}"
 
 
 def qcolor(rgb, a: int = 255) -> QColor:
