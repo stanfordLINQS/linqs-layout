@@ -1,9 +1,8 @@
 # linqs-layout
 
-Ultrafast tooling for **photonic-integrated-circuit layouts** in flattened DXF:
-a loader that turns a giant layout into numpy in a few hundred milliseconds, a
-GPU viewer that draws all of it at interactive framerates, and (next) design-rule
-checks by analogy to PCB/IC DRC.
+A fast, general layout engine for **large flattened DXF files**: a loader that
+turns a giant layout into numpy in a few hundred milliseconds, a GPU viewer that
+draws all of it at interactive framerates, and (next) design-rule checks (DRC).
 
 On the reference file (`TOPO06.dxf`, 220 MB / 6.06 M vertices):
 
@@ -38,7 +37,7 @@ python3 inspect_dxf.py TOPO06.dxf --json   # machine-readable
 
 ## Layout viewer
 
-A GPU-accelerated viewer that renders the whole chip and stays interactive.
+A GPU-accelerated viewer that renders the whole layout and stays interactive.
 
 ```bash
 pip install -r requirements-viewer.txt
@@ -112,5 +111,5 @@ The SoA representation is the substrate for rule checks:
 
 1. **Spatial index** per layer (`shapely.STRtree`, available) for neighbor queries.
 2. **Width / spacing / enclosure / min-area** rules over polygons + circles.
-3. **Inter-layer** rules (e.g. electrode-to-waveguide clearance).
+3. **Inter-layer** rules (e.g. clearance between two layers).
 4. Violation reporting with coordinates + an overlay viewer.
