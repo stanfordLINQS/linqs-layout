@@ -21,7 +21,7 @@ from PySide6.QtCore import Qt, QPointF
 from PySide6.QtGui import (QAction, QColor, QFont, QIcon, QKeySequence, QPainter,
                            QPen, QPixmap, QShortcut)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QMainWindow,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
@@ -486,6 +486,10 @@ class MainWindow(QMainWindow):
         act_close.setShortcut(QKeySequence.StandardKey.Close)
         act_close.triggered.connect(self.close)
         file_menu.addAction(act_close)
+        file_menu.addSeparator()
+        act_keys = QAction("Keybindings", self)
+        act_keys.triggered.connect(self._show_keybindings)
+        file_menu.addAction(act_keys)
 
         view_menu = bar.addMenu("View")
         for key, label, fn in (
@@ -500,6 +504,35 @@ class MainWindow(QMainWindow):
             act.setShortcut(QKeySequence(key))
             act.triggered.connect(fn)
             view_menu.addAction(act)
+
+    def _show_keybindings(self):
+        rows = [
+            ("scroll", "zoom at cursor"),
+            ("drag", "pan"),
+            ("R", "reset view"),
+            ("click layer", "show / hide layer"),
+            ("L", "toggle layer panel"),
+            ("M", "measure tool"),
+            ("shift (measure)", "constrain to horizontal / vertical"),
+            ("F", "toggle fill"),
+            ("G", "toggle grid"),
+            ("B", "light / dark"),
+            ("esc", "clear measurement"),
+            ("⌘O", "open file"),
+            ("⌘W", "close window"),
+        ]
+        w = max(len(k) for k, _ in rows)
+        text = "\n".join(f"{k.ljust(w)}    {v}" for k, v in rows)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Keybindings")
+        dlg.setStyleSheet("background: rgb(%d,%d,%d);" % style.CANVAS)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(22, 20, 22, 20)
+        lbl = QLabel(text)
+        lbl.setFont(_mono(13))
+        lbl.setStyleSheet("color: rgb(%d,%d,%d);" % style.INK)
+        lay.addWidget(lbl)
+        dlg.exec()
 
     def toggle_panel(self):
         """Show / hide the layer panel (L)."""
