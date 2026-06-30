@@ -159,7 +159,7 @@ class GLViewport(QOpenGLWidget):
         self.cam = Camera2D()
         self.scene: GLScene | None = None
         self.ctx = None
-        self._fitted = False
+        self._user_view = False        # True once the user has panned/zoomed
         self._last = None
         self.bg = BG_DARK
         self._light = False
@@ -200,9 +200,11 @@ class GLViewport(QOpenGLWidget):
     def resizeGL(self, w, h):
         self.cam.resize(self.width(), self.height())
         self.overlay.setGeometry(0, 0, self.width(), self.height())
-        if not self._fitted and self.scene is not None:
+        # Keep fitting until the user takes over, so the initial view matches the
+        # final viewport size (and equals the R / reset view) rather than fitting
+        # an early, smaller layout size.
+        if self.scene is not None and not self._user_view:
             self.cam.fit(self._layout.bbox())
-            self._fitted = True
 
     def paintGL(self):
         fbo = self.ctx.detect_framebuffer()
@@ -245,6 +247,7 @@ class GLViewport(QOpenGLWidget):
         if steps:
             p = e.position()
             self.cam.zoom_at(p.x(), p.y(), 1.2 ** steps)
+            self._user_view = True
             self._emit_status(p.x(), p.y())
             self._refresh()
 
@@ -276,6 +279,7 @@ class GLViewport(QOpenGLWidget):
         if self._last is not None:
             self.cam.pan_pixels(p.x() - self._last[0], p.y() - self._last[1])
             self._last = (p.x(), p.y())
+            self._user_view = True
             self._refresh()
 
     def mouseReleaseEvent(self, e):
@@ -317,6 +321,7 @@ class GLViewport(QOpenGLWidget):
         self._refresh()
 
     def reset_view(self):
+        self._user_view = False        # resume auto-fit (until the next pan/zoom)
         self.cam.fit(self._layout.bbox())
         self._refresh()
 
