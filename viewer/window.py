@@ -131,6 +131,9 @@ class MainWindow(QMainWindow):
         act_keys = QAction("Keybindings", self)
         act_keys.triggered.connect(self._show_keybindings)
         file_menu.addAction(act_keys)
+        act_upd = QAction("Check for Updates…", self)
+        act_upd.triggered.connect(self._check_updates)
+        file_menu.addAction(act_upd)
 
         view_menu = bar.addMenu("View")
 
@@ -182,6 +185,10 @@ class MainWindow(QMainWindow):
     def _open(self):
         if self._app is not None:
             self._app.prompt_open()
+
+    def _check_updates(self):
+        from .update import check_for_updates
+        check_for_updates(self)
 
     def dragEnterEvent(self, e):
         urls = e.mimeData().urls() if e.mimeData().hasUrls() else []

@@ -17,8 +17,10 @@ DIM = (70, 70, 78)          # disabled / hidden
 HAIR = (42, 42, 48)         # 1px hairline rules
 ACCENT = (255, 176, 0)      # #ffb000   amber — the single interactive accent
 
-MONO = '"SF Mono", "JetBrains Mono", Menlo, monospace'
-MONO_FAMILY = "Menlo"       # concrete family for QFont (always present on macOS)
+# Use Menlo (always present on macOS). Avoid naming "SF Mono" — Qt can't resolve it
+# by family name there, which logs a warning and pays an alias-populate cost.
+MONO = "Menlo, monospace"
+MONO_FAMILY = "Menlo"       # concrete family for QFont
 
 # GL clear color (0-1 floats), kept in sync with the canvas token.
 CANVAS_GL = tuple(c / 255.0 for c in CANVAS)
