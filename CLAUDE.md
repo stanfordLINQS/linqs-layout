@@ -49,8 +49,14 @@ viewer/scene.py         moderngl renderer. Outlines: 1 GL_LINES batch + instance
                         real-time. Layer color+visibility in-shader. Context-agnostic.
 viewer/camera.py        orthographic pan + zoom-at-cursor (world<->pixel mapping)
 viewer/palette.py       distinct per-layer colors (vectorized HSV, no matplotlib)
+viewer/snap.py          measuring-tool snapping (nearest corner / edge)
+viewer/style.py         design tokens + app-wide QSS (brutalist / amber)
 viewer/offscreen.py     standalone-context render-to-PNG (headless; the render test)
-viewer/qt_app.py        PySide6 window: QOpenGLWidget viewport + layer-panel sidebar
+viewer/overlay.py       MeasureOverlay HUD (scale bar, measurement) + helpers
+viewer/viewport.py      GLViewport: QOpenGLWidget (pan/zoom/measure/background)
+viewer/panel.py         LayerPanel sidebar + layer swatches
+viewer/window.py        LayoutView (tab) + MainWindow (tabs) + WelcomeWindow
+viewer/app.py           ViewerApp: file-open / Open-With / single tabbed window
 TOPO06.dxf              reference layout (220 MB; gitignored; not source — do not edit)
 ```
 

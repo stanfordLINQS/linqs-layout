@@ -19,7 +19,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 from pydxf import DxfLayout
 
 from . import style
-from .qt_app import MainWindow, WelcomeWindow
+from .window import MainWindow, WelcomeWindow
 
 
 def _configure_format():

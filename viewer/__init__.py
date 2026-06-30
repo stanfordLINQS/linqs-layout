@@ -8,8 +8,14 @@ toggling a layer is a one-float uniform write with no buffer rebuild.
 - :mod:`viewer.scene`     context-agnostic moderngl renderer
 - :mod:`viewer.camera`    orthographic pan / zoom-at-cursor camera
 - :mod:`viewer.palette`   distinct per-layer colors
+- :mod:`viewer.snap`      measuring-tool snapping (nearest corner / edge)
+- :mod:`viewer.style`     design tokens + app-wide stylesheet
 - :mod:`viewer.offscreen` headless render-to-PNG (works without a display)
-- :mod:`viewer.qt_app`    interactive PySide6 window with a layer sidebar
+- :mod:`viewer.overlay`   measurement / scale-bar HUD
+- :mod:`viewer.viewport`  the GL viewport widget (pan / zoom / measure)
+- :mod:`viewer.panel`     the layer-panel sidebar
+- :mod:`viewer.window`    tabbed window, per-tab view, welcome screen
+- :mod:`viewer.app`       application entry / file opening
 """
 
 from .camera import Camera2D
