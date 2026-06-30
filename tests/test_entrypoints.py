@@ -88,6 +88,10 @@ def _run_noarg_scenario() -> int:
         if app.windows_open == 0:
             app.show_welcome()
 
+    from viewer import style
+
+    open_label = style.key_label("O")          # '⌘O' on macOS, 'Ctrl+O' elsewhere
+
     def check_and_quit():
         try:
             ok = True
@@ -96,7 +100,7 @@ def _run_noarg_scenario() -> int:
             ok &= _check("welcome window shown", w is not None and w.isVisible(), True)
             if w is not None:
                 text = " ".join(lbl.text() for lbl in w.findChildren(QLabel))
-                ok &= _check("hint mentions Ctrl+O", "Ctrl+O" in text, True)
+                ok &= _check(f"hint mentions {open_label}", open_label in text, True)
             state["ok"] = ok
         except Exception as ex:  # noqa: BLE001
             print(f"  [FAIL] exception during check: {ex!r}")
