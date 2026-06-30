@@ -15,7 +15,7 @@ DMG="dist/LINQS-Layout.dmg"
 
 STAGE="$(mktemp -d)/LINQS Layout"
 mkdir -p "$STAGE"
-cp -R "$APP" "$STAGE/"
+ditto --noextattr --norsrc "$APP" "$STAGE/LINQS Layout.app"   # clean copy (no iCloud xattrs)
 ln -s /Applications "$STAGE/Applications"     # drag-to-install target
 
 rm -f "$DMG"
