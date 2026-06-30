@@ -1,18 +1,21 @@
 """In-app update: check the latest GitHub release and install it.
 
-Uses the GitHub CLI (``gh``) so it works against the private repo for anyone with
-access. The check and the download/install run on background threads; the prompts
-are plain dialogs. Installing replaces ``/Applications/LINQS Layout.app`` in place
-(macOS lets you replace a running bundle) and offers to relaunch.
+Uses the public GitHub REST API over plain HTTPS (``urllib``) — no GitHub CLI and
+no token, so it works for anyone (the repo's releases are public). The check and
+the download/install run on background threads; installing replaces
+``/Applications/LINQS Layout.app`` in place (macOS lets you replace a running
+bundle) and offers to relaunch, reopening the layouts that were open.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import urllib.request
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
@@ -20,6 +23,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 from . import __version__
 
 REPO = "stanfordLINQS/linqs-layout"
+API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 INSTALL_PATH = "/Applications/LINQS Layout.app"
 
 
@@ -31,46 +35,37 @@ def _vt(s: str):
     return tuple(int(x) for x in re.findall(r"\d+", s or "")[:3])
 
 
-def _gh() -> str | None:
-    # A Finder-launched .app doesn't inherit the shell PATH, so also look in the
-    # usual Homebrew locations where gh lives.
-    return (shutil.which("gh")
-            or next((p for p in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh")
-                     if os.path.exists(p)), None))
+def _fetch_latest():
+    """Return (version, dmg_url) for the latest release, or (None, None)."""
+    try:
+        req = urllib.request.Request(
+            API_LATEST,
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "linqs-layout"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.load(r)
+        ver = (data.get("tag_name") or "").lstrip("v") or None
+        dmg = next((a.get("browser_download_url") for a in data.get("assets", [])
+                    if str(a.get("name", "")).lower().endswith(".dmg")), None)
+        return ver, dmg
+    except Exception:
+        return None, None
 
 
 def latest_version() -> str | None:
-    """Latest release version (e.g. '1.0.6'), or None if gh is unavailable/fails."""
-    gh = _gh()
-    if not gh:
-        return None
-    try:
-        r = subprocess.run(
-            [gh, "release", "view", "--repo", REPO, "--json", "tagName", "-q", ".tagName"],
-            capture_output=True, text=True, timeout=20)
-        return (r.stdout.strip().lstrip("v") or None) if r.returncode == 0 else None
-    except Exception:
-        return None
+    return _fetch_latest()[0]
 
 
 def _download_and_install() -> bool:
     """Download the latest release DMG and install the .app into /Applications."""
-    gh = _gh()
-    if not gh:
+    _ver, url = _fetch_latest()
+    if not url:
         return False
     tmp = tempfile.mkdtemp()
     try:
-        r = subprocess.run(
-            [gh, "release", "download", "--repo", REPO, "--pattern", "*.dmg",
-             "--dir", tmp, "--clobber"],
-            capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
-            return False
-        dmgs = [f for f in os.listdir(tmp) if f.lower().endswith(".dmg")]
-        if not dmgs:
-            return False
+        dmg = os.path.join(tmp, "update.dmg")
+        urllib.request.urlretrieve(url, dmg)          # public asset; follows redirects
         att = subprocess.run(
-            ["hdiutil", "attach", os.path.join(tmp, dmgs[0]), "-nobrowse", "-noverify", "-readonly"],
+            ["hdiutil", "attach", dmg, "-nobrowse", "-noverify", "-readonly"],
             capture_output=True, text=True)
         mnt = next((ln.split("\t")[-1].strip() for ln in att.stdout.splitlines()
                     if "/Volumes/" in ln), None)
@@ -131,21 +126,18 @@ class _InstallThread(QThread):
 def check_for_updates(window, silent: bool = False):
     """Check for a newer release; if found, offer to download + install it.
 
-    ``silent`` suppresses the "you're up to date" / "gh missing" dialogs (used for
-    the automatic check at startup)."""
-    if not _gh():
-        if not silent:
-            QMessageBox.information(
-                window, "Updates",
-                "The GitHub CLI (gh) is required to check for updates.\n"
-                "Install it with:  brew install gh  &&  gh auth login")
-        return
-
+    ``silent`` suppresses the "you're up to date" / failure dialogs (used for the
+    automatic check at startup)."""
     th = _CheckThread(window)
     window.__update_check = th        # keep a reference alive
 
     def got(latest):
-        if not latest or _vt(latest) <= _vt(current_version()):
+        if not latest:
+            if not silent:
+                QMessageBox.information(
+                    window, "Updates", "Could not reach the update server.")
+            return
+        if _vt(latest) <= _vt(current_version()):
             if not silent:
                 QMessageBox.information(
                     window, "Up to date",
@@ -181,8 +173,7 @@ def _install(window, latest):
         elif not ok:
             QMessageBox.warning(
                 window, "Update failed",
-                "Could not install the update. Try the releases page, "
-                "or run `bash packaging/update.sh`.")
+                "Could not install the update. Try the releases page on GitHub.")
 
     inst.result.connect(done)
     inst.start()
