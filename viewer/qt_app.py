@@ -441,6 +441,7 @@ class MainWindow(QMainWindow):
 
         self.viewport = GLViewport(layout)
         self.panel = LayerPanel(layout, self.viewport)
+        self.panel.setMinimumWidth(180)           # can't be dragged to nothing
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.viewport)
         splitter.addWidget(self.panel)
@@ -448,6 +449,10 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 0)
         splitter.setSizes([1160, 240])
         splitter.setHandleWidth(1)
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        self._splitter = splitter
+        self._panel_w = 240
         self.setCentralWidget(splitter)
         self.resize(1400, 1000)
 
@@ -481,13 +486,24 @@ class MainWindow(QMainWindow):
             ("R", "Reset View", self.viewport.reset_view),
             ("F", "Toggle Fill", self.panel.fill_btn.toggle),
             ("G", "Toggle Grid", self.panel.grid_btn.toggle),
-            ("L", "Light / Dark", self.panel.bg_btn.toggle),
+            ("B", "Light / Dark", self.panel.bg_btn.toggle),
+            ("L", "Toggle Layer Panel", self.toggle_panel),
             ("M", "Measure", self.panel.measure_btn.toggle),
         ):
             act = QAction(label, self)
             act.setShortcut(QKeySequence(key))
             act.triggered.connect(fn)
             view_menu.addAction(act)
+
+    def toggle_panel(self):
+        """Show / hide the layer panel (L)."""
+        if self.panel.isVisible():
+            self._panel_w = max(self.panel.width(), 180)
+            self.panel.hide()
+        else:
+            self.panel.show()
+            self._splitter.setSizes(
+                [max(self.width() - self._panel_w, 200), self._panel_w])
 
     def _open(self):
         if self._app is not None:
