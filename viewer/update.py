@@ -92,8 +92,25 @@ def _download_and_install() -> bool:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _relaunch():
-    subprocess.Popen(["open", "-n", INSTALL_PATH])
+def _open_paths(window) -> list[str]:
+    """The layout file paths currently open in ``window`` (empty for the welcome
+    screen), so relaunch can reopen them."""
+    tabs = getattr(window, "tabs", None)
+    if tabs is None:
+        return []
+    paths = []
+    for i in range(tabs.count()):
+        p = getattr(getattr(tabs.widget(i), "layout_obj", None), "path", None)
+        if p:
+            paths.append(p)
+    return paths
+
+
+def _relaunch(paths=None):
+    args = ["open", "-n", INSTALL_PATH]
+    if paths:
+        args += ["--args", *paths]          # reopen the current layouts
+    subprocess.Popen(args)
     QApplication.quit()
 
 
@@ -160,7 +177,7 @@ def _install(window, latest):
                 f"Updated to {latest}. Relaunch now?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) == QMessageBox.StandardButton.Yes:
-            _relaunch()
+            _relaunch(_open_paths(window))
         elif not ok:
             QMessageBox.warning(
                 window, "Update failed",

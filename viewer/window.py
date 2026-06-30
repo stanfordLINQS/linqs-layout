@@ -230,6 +230,13 @@ class WelcomeWindow(QMainWindow):
         act_open.setShortcut(QKeySequence.StandardKey.Open)
         act_open.triggered.connect(lambda: self._app.prompt_open())
         file_menu.addAction(act_open)
+        act_upd = QAction("Check for Updates…", self)
+        act_upd.triggered.connect(self._check_updates)
+        file_menu.addAction(act_upd)
+
+    def _check_updates(self):
+        from .update import check_for_updates
+        check_for_updates(self)
 
     def dragEnterEvent(self, e):
         urls = e.mimeData().urls() if e.mimeData().hasUrls() else []

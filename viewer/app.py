@@ -41,6 +41,7 @@ class ViewerApp(QApplication):
         self.setStyleSheet(style.stylesheet())
         self._main = None                       # the single tabbed window
         self._welcome = None
+        self._update_checked = False            # auto update-check runs once
 
     # macOS delivers double-clicked / "Open With" files as a FileOpen event.
     def event(self, e):
@@ -54,13 +55,23 @@ class ViewerApp(QApplication):
             self._main = MainWindow(app=self)
             self._main.show()
             self._main.destroyed.connect(self._forget_main)
-            QTimer.singleShot(1500, self._check_updates_silent)
+            self._maybe_check_updates()
         return self._main
 
-    def _check_updates_silent(self):
-        if self._main is not None:
-            from .update import check_for_updates
-            check_for_updates(self._main, silent=True)
+    def _maybe_check_updates(self):
+        """Run the automatic update check once, from whichever window is up first
+        (the welcome screen or the main window)."""
+        if self._update_checked:
+            return
+        self._update_checked = True
+        from .update import check_for_updates
+
+        def fire():
+            w = self._main or self._welcome
+            if w is not None:
+                check_for_updates(w, silent=True)
+
+        QTimer.singleShot(1500, fire)
 
     def _forget_main(self, *_):
         self._main = None
@@ -90,6 +101,7 @@ class ViewerApp(QApplication):
         self._welcome.show()
         self._welcome.raise_()
         self._welcome.activateWindow()
+        self._maybe_check_updates()
 
     def prompt_open(self) -> bool:
         path, _ = QFileDialog.getOpenFileName(
