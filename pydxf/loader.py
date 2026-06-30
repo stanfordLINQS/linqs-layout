@@ -20,7 +20,11 @@ from dataclasses import dataclass
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_LIB_DIR = os.path.join(os.path.dirname(_HERE), "dxfcore")
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    # PyInstaller bundle: the dylib is collected next to the app's frozen modules.
+    _LIB_DIR = os.path.join(sys._MEIPASS, "dxfcore")
+else:
+    _LIB_DIR = os.path.join(os.path.dirname(_HERE), "dxfcore")
 
 
 def _libname() -> str:
