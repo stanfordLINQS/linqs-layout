@@ -256,6 +256,33 @@ class GLScene:
         self._fill_count = (tri_per_layer * 3).astype(np.int64)            # index counts
         self._fill_off = ((np.cumsum(tri_per_layer) - tri_per_layer) * 3).astype(np.int64)
 
+        # Per-layer world-space bbox (fillable polygons only), for scissoring the
+        # wind/cover passes in draw() to where each layer's geometry actually is
+        # instead of the full viewport every layer -- the wind pass's clear +
+        # rasterization cost is fragment-fill-rate bound (profiled: ~1.85ms at
+        # 30k px vs ~41ms at 5M px for the same geometry), so this is the
+        # dominant lever for layer-heavy files.
+        v = self._raw_pos
+        fillable = t > 0                                  # polygons contributing fill tris
+        if fillable.any():
+            poly_idx = order[fillable]
+            poly_xmin = np.minimum.reduceat(v[:, 0], start)[poly_idx]
+            poly_xmax = np.maximum.reduceat(v[:, 0], start)[poly_idx]
+            poly_ymin = np.minimum.reduceat(v[:, 1], start)[poly_idx]
+            poly_ymax = np.maximum.reduceat(v[:, 1], start)[poly_idx]
+            poly_layer = layer[poly_idx]
+            self._layer_xmin = np.full(self.n_layers, np.inf)
+            self._layer_xmax = np.full(self.n_layers, -np.inf)
+            self._layer_ymin = np.full(self.n_layers, np.inf)
+            self._layer_ymax = np.full(self.n_layers, -np.inf)
+            np.minimum.at(self._layer_xmin, poly_layer, poly_xmin)
+            np.maximum.at(self._layer_xmax, poly_layer, poly_xmax)
+            np.minimum.at(self._layer_ymin, poly_layer, poly_ymin)
+            np.maximum.at(self._layer_ymax, poly_layer, poly_ymax)
+        else:
+            self._layer_xmin = self._layer_ymin = np.full(self.n_layers, np.inf)
+            self._layer_xmax = self._layer_ymax = np.full(self.n_layers, -np.inf)
+
         self.fill_vao = ctx.vertex_array(
             self.wind_prog, [(self._pos_buf, "2f", "in_pos")],   # shared vertex buffer
             index_buffer=ctx.buffer(idx.tobytes()), index_element_size=4)
@@ -319,6 +346,30 @@ class GLScene:
         self._wind_fbo = self.ctx.framebuffer(color_attachments=[self._wind_tex])
         self._wind_size = size
 
+    def _screen_scissor(self, lid, scale, offset, W, H):
+        """Pixel-space (x, y, w, h) scissor rect (GL bottom-left origin) for
+        layer ``lid``'s on-screen bbox, clamped to the framebuffer, or None if
+        it's entirely off-screen. clip = world * scale + offset (same
+        transform the vertex shaders use); world/clip +y is up, matching GL
+        window coordinates, so no axis flip is needed."""
+        xmin, xmax = self._layer_xmin[lid], self._layer_xmax[lid]
+        ymin, ymax = self._layer_ymin[lid], self._layer_ymax[lid]
+        if xmin > xmax:                                    # no fillable geometry
+            return None
+        sx, sy = scale
+        ox, oy = offset
+        cx0, cx1 = xmin * sx + ox, xmax * sx + ox
+        cy0, cy1 = ymin * sy + oy, ymax * sy + oy
+        x0 = int(np.floor((cx0 + 1.0) * 0.5 * W)) - 1       # -1px margin: AA/winding can
+        x1 = int(np.ceil((cx1 + 1.0) * 0.5 * W)) + 1        # touch a pixel just outside
+        y0 = int(np.floor((cy0 + 1.0) * 0.5 * H)) - 1       # the exact transformed bbox
+        y1 = int(np.ceil((cy1 + 1.0) * 0.5 * H)) + 1
+        x0, y0 = max(x0, 0), max(y0, 0)
+        x1, y1 = min(x1, W), min(y1, H)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return (x0, y0, x1 - x0, y1 - y0)
+
     def draw(self, main_fbo, scale, offset, grid_spacing=None) -> None:
         """Render into ``main_fbo`` (already bound + cleared by the caller).
 
@@ -357,27 +408,41 @@ class GLScene:
             self.grid_vao.render(moderngl.TRIANGLES, vertices=3)
             ctx.disable(moderngl.BLEND)
 
-        # Pass 1a: per-layer winding fills for polygons.
+        # Pass 1a: per-layer winding fills for polygons, scissored to each
+        # layer's actual on-screen bbox. The wind pass's clear + rasterization
+        # cost is fragment-fill-rate bound (profiled: ~1.85ms at 30k px vs
+        # ~41ms at 5M px for the same geometry) -- clearing/shading the full
+        # viewport for every layer regardless of how much screen space that
+        # layer's geometry occupies is the dominant cost on layer-heavy files.
+        # State that's the same across the whole pass (texture unit, blend
+        # enable) is set once outside the loop, not per layer.
         if self.show_fill and self.fill_vao is not None:
             self._ensure_wind(main_fbo.size)
             self.cover_prog["u_wind"].value = 0
             self.cover_prog["u_alpha"].value = self.fill_alpha
+            self._wind_tex.use(0)
+            ctx.enable(moderngl.BLEND)
+            W, H = main_fbo.size
             for lid in range(self.n_layers):
                 cnt = int(self._fill_count[lid])
                 if cnt == 0 or self.visible[lid] < 0.5:
                     continue
+                rect = self._screen_scissor(lid, scale, offset, W, H)
+                if rect is None:
+                    continue                                          # entirely off-screen
+                self._wind_fbo.scissor = rect
                 self._wind_fbo.use()
                 ctx.clear(0.0)
-                ctx.enable(moderngl.BLEND)
                 ctx.blend_func = moderngl.ONE, moderngl.ONE          # accumulate winding
                 self.fill_vao.render(moderngl.TRIANGLES, vertices=cnt, first=int(self._fill_off[lid]))
 
+                main_fbo.scissor = rect
                 main_fbo.use()
                 ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
-                self._wind_tex.use(0)
                 self.cover_prog["u_fill_color"].value = tuple(
                     float(c * self._shade) for c in self.colors[lid])
                 self.cover_vao.render(moderngl.TRIANGLES, vertices=3)
+            main_fbo.scissor = None        # restore full viewport for the passes below
 
         # Pass 1b: convex circle fills (plain alpha).
         if self.show_fill and self.circ_fan_vao is not None:
