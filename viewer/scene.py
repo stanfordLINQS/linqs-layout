@@ -117,6 +117,48 @@ void main() {
 }
 """
 
+# Background grid: procedural dots at "nice" world-spaced nodes (fullscreen pass).
+_FRAG_GRID = """
+#version 330
+uniform vec2 u_scale;
+uniform vec2 u_offset;
+uniform vec2 u_viewport;
+uniform float u_spacing;
+uniform float u_upp;
+uniform vec3 u_dot_color;
+uniform float u_dot_alpha;
+uniform float u_dot_px;
+out vec4 f_color;
+void main() {
+    vec2 clip = 2.0 * gl_FragCoord.xy / u_viewport - 1.0;
+    vec2 world = (clip - u_offset) / u_scale;
+    vec2 node = floor(world / u_spacing + 0.5) * u_spacing;
+    float dpx = length(world - node) / u_upp;       // distance to nearest node, px
+    float a = 1.0 - smoothstep(u_dot_px - 0.75, u_dot_px + 0.75, dpx);
+    if (a <= 0.0) discard;
+    f_color = vec4(u_dot_color, a * u_dot_alpha);
+}
+"""
+
+_GRID_TARGET_PX = 78.0      # aim for ~this on-screen spacing between dots
+_GRID_DOT_PX = 1.6          # dot radius in pixels
+
+
+def _nice_spacing(raw: float) -> float:
+    """Round a raw world spacing up to a 1 / 2 / 5 x 10^k 'nice' value."""
+    import math
+    if raw <= 0:
+        return 1.0
+    base = 10.0 ** math.floor(math.log10(raw))
+    m = raw / base
+    nice = 1.0 if m < 1.5 else 2.0 if m < 3.5 else 5.0 if m < 7.5 else 10.0
+    return nice * base
+
+
+def nice_grid_spacing(upp: float) -> float:
+    """Grid/scale-bar spacing (world units) for a given units-per-pixel."""
+    return _nice_spacing(upp * _GRID_TARGET_PX)
+
 
 class GLScene:
     """GPU geometry + shaders for one layout. Construct inside an active context."""
@@ -127,6 +169,8 @@ class GLScene:
         self.colors = layer_colors(self.n_layers)
         self.visible = np.ones(self.n_layers, np.float32)
         self.show_fill = True
+        self.show_grid = True
+        self.grid_spacing = 1.0     # world units between grid nodes (set each draw)
         self.fill_alpha = float(fill_alpha)
         self._shade = 1.0          # color multiplier (dimmed in light-background mode)
 
@@ -137,12 +181,14 @@ class GLScene:
             vertex_shader=_VERT_CIRCLE.replace("MAXL", maxl), fragment_shader=_FRAG_COLOR)
         self.wind_prog = ctx.program(vertex_shader=_VERT_WIND, fragment_shader=_FRAG_WIND)
         self.cover_prog = ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_COVER)
+        self.grid_prog = ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_GRID)
         for prog in (self.outline_prog, self.circ_prog):
             prog["u_color"].write(self.colors.tobytes())
 
-        cover = np.array([-1, -1, 3, -1, -1, 3], np.float32)   # fullscreen triangle
-        self.cover_vao = ctx.vertex_array(
-            self.cover_prog, [(ctx.buffer(cover.tobytes()), "2f", "in_p")])
+        fs = np.array([-1, -1, 3, -1, -1, 3], np.float32)      # fullscreen triangle
+        fs_buf = ctx.buffer(fs.tobytes())
+        self.cover_vao = ctx.vertex_array(self.cover_prog, [(fs_buf, "2f", "in_p")])
+        self.grid_vao = ctx.vertex_array(self.grid_prog, [(fs_buf, "2f", "in_p")])
 
         self._wind_tex = self._wind_fbo = None
         self._wind_size = None
@@ -249,6 +295,9 @@ class GLScene:
         self.show_fill = not self.show_fill
         return self.show_fill
 
+    def set_grid(self, on: bool) -> None:
+        self.show_grid = bool(on)
+
     def set_shade(self, shade: float) -> None:
         """Multiply all layer colors by ``shade`` (used to darken for light bg)."""
         self._shade = float(shade)
@@ -267,8 +316,12 @@ class GLScene:
         self._wind_fbo = self.ctx.framebuffer(color_attachments=[self._wind_tex])
         self._wind_size = size
 
-    def draw(self, main_fbo, scale, offset) -> None:
-        """Render into ``main_fbo`` (already bound + cleared by the caller)."""
+    def draw(self, main_fbo, scale, offset, grid_spacing=None) -> None:
+        """Render into ``main_fbo`` (already bound + cleared by the caller).
+
+        ``grid_spacing`` overrides the grid/scale-bar spacing (world units); pass
+        the camera-derived value so it matches the on-screen scale bar exactly.
+        """
         ctx = self.ctx
         scale = (float(scale[0]), float(scale[1]))
         offset = (float(offset[0]), float(offset[1]))
@@ -278,6 +331,28 @@ class GLScene:
             prog["u_visible"].write(self.visible.tobytes())
         self.wind_prog["u_scale"].value = scale
         self.wind_prog["u_offset"].value = offset
+
+        # Grid spacing (also drives the on-screen scale bar) — computed every frame.
+        W, H = main_fbo.size
+        upp = 2.0 / (scale[0] * W)
+        self.grid_spacing = float(grid_spacing) if grid_spacing else _nice_spacing(upp * _GRID_TARGET_PX)
+
+        # Pass 0: background dot grid (behind all geometry).
+        if self.show_grid:
+            gp = self.grid_prog
+            gp["u_scale"].value = scale
+            gp["u_offset"].value = offset
+            gp["u_viewport"].value = (float(W), float(H))
+            gp["u_spacing"].value = self.grid_spacing
+            gp["u_upp"].value = upp
+            gp["u_dot_color"].value = (0.46, 0.49, 0.57) if self._shade >= 1.0 else (0.42, 0.42, 0.50)
+            gp["u_dot_alpha"].value = 0.7
+            gp["u_dot_px"].value = _GRID_DOT_PX
+            main_fbo.use()
+            ctx.enable(moderngl.BLEND)
+            ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+            self.grid_vao.render(moderngl.TRIANGLES, vertices=3)
+            ctx.disable(moderngl.BLEND)
 
         # Pass 1a: per-layer winding fills for polygons.
         if self.show_fill and self.fill_vao is not None:

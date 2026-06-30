@@ -21,18 +21,23 @@ from PySide6.QtCore import Qt, QPointF
 from PySide6.QtGui import (QAction, QColor, QFont, QIcon, QKeySequence, QPainter,
                            QPen, QPixmap, QShortcut)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QMainWindow, QPushButton,
-                               QSplitter, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel,
+                               QListWidget, QListWidgetItem, QMainWindow,
+                               QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from .camera import Camera2D
 from .offscreen import BG_DARK, BG_LIGHT
 from .palette import layer_colors
-from .scene import GLScene
+from .scene import GLScene, nice_grid_spacing
 from .snap import Snapper
 
 _VIS_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _LID_ROLE = int(Qt.ItemDataRole.UserRole)
+
+
+def _format_dist(v: float) -> str:
+    """Format a layout distance (assumed microns) as µm / mm."""
+    return f"{v / 1000.0:g} mm" if v >= 1000.0 else f"{v:g} µm"
 
 
 class MeasureOverlay(QWidget):
@@ -46,22 +51,56 @@ class MeasureOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
+    def _draw_scale_bar(self, p, light):
+        """Bottom-left scale bar: one grid cell, labeled in µm/mm."""
+        vp = self._vp
+        scene = vp.scene
+        if scene is None or vp.cam.upp <= 0:
+            return
+        g = getattr(scene, "grid_spacing", 0.0)
+        if g <= 0:
+            return
+        length = g / vp.cam.upp                       # one grid cell, in logical px
+        x0, y0 = 18.0, self.height() - 22.0
+        label = _format_dist(g)
+
+        f = QFont()
+        f.setPointSize(10)
+        f.setBold(True)
+        p.setFont(f)
+        lw = p.fontMetrics().horizontalAdvance(label)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 180) if light else QColor(0, 0, 0, 140))
+        p.drawRoundedRect(int(x0 - 8), int(y0 - 28), int(max(length, lw) + 18), 40, 5, 5)
+
+        col = QColor(35, 38, 46) if light else QColor(228, 231, 238)
+        p.setPen(QPen(col, 2.0))
+        p.drawLine(QPointF(x0, y0), QPointF(x0 + length, y0))
+        p.drawLine(QPointF(x0, y0 - 5), QPointF(x0, y0 + 5))
+        p.drawLine(QPointF(x0 + length, y0 - 5), QPointF(x0 + length, y0 + 5))
+        p.drawText(QPointF(x0, y0 - 9), label)
+
     def paintEvent(self, _e):
         vp = self._vp
+        cam = vp.cam
+        light = vp.is_light()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        self._draw_scale_bar(p, light)
+
         chain = list(vp.measure_points)
         if len(chain) == 1 and vp.measure_cursor is not None:
             chain = [chain[0], vp.measure_cursor]
         show_snap = (vp.measure_mode and vp.snap_kind in ("corner", "edge")
                      and vp.measure_cursor is not None)
         if not chain and not show_snap:
+            p.end()
             return
 
-        cam = vp.cam
-        light = vp.is_light()
         accent = QColor(230, 120, 0) if light else QColor(255, 150, 30)
         snapcol = QColor(0, 150, 210) if light else QColor(60, 215, 255)
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         def to_s(pt):
             sx, sy = cam.world_to_screen(pt[0], pt[1])
@@ -167,7 +206,9 @@ class GLViewport(QOpenGLWidget):
         self.ctx.clear(*self.bg)
         if self.scene is not None:
             (sx, sy), (ox, oy) = self.cam.scale_offset()
-            self.scene.draw(fbo, (sx, sy), (ox, oy))
+            self.scene.draw(fbo, (sx, sy), (ox, oy),
+                            grid_spacing=nice_grid_spacing(self.cam.upp))
+        self.overlay.update()           # keep the HUD (scale bar, measurement) in sync
 
     def _refresh(self):
         self.update()
@@ -256,6 +297,11 @@ class GLViewport(QOpenGLWidget):
             self.scene.show_fill = bool(on)
             self.update()
 
+    def set_grid(self, on: bool):
+        if self.scene is not None:
+            self.scene.show_grid = bool(on)
+            self.update()
+
     def set_background(self, light: bool):
         self._light = bool(light)
         self.bg = BG_LIGHT if light else BG_DARK
@@ -321,17 +367,19 @@ class LayerPanel(QWidget):
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         root.addWidget(sep)
-        self.measure_btn = QPushButton("Measure")
-        self.measure_btn.setCheckable(True)
+        # Checkboxes (not checkable push buttons): on macOS a checkable button
+        # gives no visible checked state, so a default-on toggle looks off.
+        self.measure_btn = QCheckBox("Measure")
         self.measure_btn.toggled.connect(viewport.set_measure_mode)
-        self.fill_btn = QPushButton("Fill")
-        self.fill_btn.setCheckable(True)
-        self.fill_btn.setChecked(True)
+        self.fill_btn = QCheckBox("Fill")
+        self.fill_btn.setChecked(True)            # fill is on by default
         self.fill_btn.toggled.connect(viewport.set_fill)
-        self.bg_btn = QPushButton("Light background")
-        self.bg_btn.setCheckable(True)
+        self.grid_btn = QCheckBox("Grid")
+        self.grid_btn.setChecked(True)            # grid is on by default
+        self.grid_btn.toggled.connect(viewport.set_grid)
+        self.bg_btn = QCheckBox("Light background")
         self.bg_btn.toggled.connect(viewport.set_background)
-        for b in (self.measure_btn, self.fill_btn, self.bg_btn):
+        for b in (self.measure_btn, self.fill_btn, self.grid_btn, self.bg_btn):
             root.addWidget(b)
 
         hint = QLabel("Measure: click two points (snaps to the\nnearest vertex). Esc clears.")
@@ -403,6 +451,7 @@ class MainWindow(QMainWindow):
         for key, label, fn in (
             ("R", "Reset View", self.viewport.reset_view),
             ("F", "Toggle Fill", self.panel.fill_btn.toggle),
+            ("G", "Toggle Grid", self.panel.grid_btn.toggle),
             ("B", "Toggle Background", self.panel.bg_btn.toggle),
             ("M", "Measure", self.panel.measure_btn.toggle),
         ):
