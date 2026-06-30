@@ -226,15 +226,13 @@ class GLViewport(QOpenGLWidget):
     def _measure_point(self, px, py, shift):
         """Point for the measuring tool. Snapping (corner/edge) always applies;
         with Shift held while placing the second point, the snapped point is then
-        constrained to horizontal or vertical from the first point (so the locked
-        axis still picks up the snapped vertex/edge coordinate)."""
+        constrained to horizontal or vertical from the first point. The snap kind
+        is preserved, so the snap indicator still shows on the constrained point."""
         pt, kind = self._snap(px, py)
         if shift and len(self.measure_points) == 1:
             x0, y0 = self.measure_points[0]
             sx, sy = pt
-            if abs(sx - x0) >= abs(sy - y0):
-                return (sx, y0), "ortho"          # horizontal lock (snapped x)
-            return (x0, sy), "ortho"              # vertical lock (snapped y)
+            pt = (sx, y0) if abs(sx - x0) >= abs(sy - y0) else (x0, sy)
         return pt, kind
 
     # -- interaction ------------------------------------------------------
