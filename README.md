@@ -1,116 +1,71 @@
-# linqs-layout
+<p align="center">
+  <img src="packaging/icon.png" width="160" alt="LINQS Layout icon">
+</p>
 
-Ultrafast tooling for **photonic-integrated-circuit layouts** in flattened DXF:
-a loader that turns a giant layout into numpy in a few hundred milliseconds, a
-GPU viewer that draws all of it at interactive framerates, and (next) design-rule
-checks by analogy to PCB/IC DRC.
+<h1 align="center">LINQS Layout</h1>
 
-On the reference file (`TOPO06.dxf`, 220 MB / 6.06 M vertices):
-
-```
-Parsed in 290 ms  (~760 MB/s)     # full geometry, not just a scan
-Viewer: 6 M segments + 83 k circles uploaded once, redrawn every frame on the GPU
-```
-
-That's ~27× faster than a bare `awk` *counting* pass, and it materializes every
-vertex, polyline, and circle into numpy arrays ready for geometric analysis.
+<p align="center">A lightning-fast viewer for large photonic-IC layouts (flattened DXF).</p>
 
 ![overview](docs/overview.png)
 
-## Layout of the project
+LINQS Layout opens giant flattened DXF layouts in a few hundred milliseconds and
+renders the whole chip on the GPU — millions of polygons and circles — while
+staying interactive. It has translucent layer fills, per-layer show/hide, and a
+snapping measuring tool.
 
-```
-dxfcore/dxf_parse.cpp   C++ core: mmap + single-pass parse -> Structure-of-Arrays
-dxfcore/build.sh        builds libdxfcore.dylib with clang++
-pydxf/loader.py         ctypes binding -> zero-copy numpy views + DxfLayout API
-inspect_dxf.py          CLI: summarize a layout (counts, extent, per-layer table)
-view_dxf.py             CLI: interactive GPU viewer / headless PNG render
-viewer/                 moderngl scene + ortho camera + PySide6 window
-```
+## Install
 
-## Quick start
+### Option A — download the app
+1. Download **`LINQS-Layout.dmg`** from the [latest release](../../releases/latest).
+2. Open it and drag **LINQS Layout** into **Applications**.
+3. First launch: the app is not notarized, so right-click it → **Open** →
+   **Open** (only needed once). If macOS says it's "damaged", clear the quarantine
+   flag: `xattr -dr com.apple.quarantine "/Applications/LINQS Layout.app"`.
 
-```bash
-bash dxfcore/build.sh            # build the native core once
-python3 inspect_dxf.py TOPO06.dxf
-python3 inspect_dxf.py TOPO06.dxf --json   # machine-readable
-```
-
-## Layout viewer
-
-A GPU-accelerated viewer that renders the whole chip and stays interactive.
+### Option B — build it yourself
+Requires macOS 12+ on Apple Silicon, the Xcode command-line tools (`clang++`), and
+Python 3.11+.
 
 ```bash
-pip install -r requirements-viewer.txt
-python3 view_dxf.py TOPO06.dxf                 # interactive window
-python3 view_dxf.py TOPO06.dxf --png out.png   # headless render to PNG (no display)
+git clone https://github.com/stanfordLINQS/linqs-layout.git
+cd linqs-layout
+bash packaging/build_app.sh            # -> dist/LINQS Layout.app
+bash packaging/make_dmg.sh             # optional: -> dist/LINQS-Layout.dmg
 ```
 
-* **scroll** to zoom in / out, centered on the cursor
-* **left-drag** to pan
-* **right-hand layer panel** — click a layer to show / hide it (`Show all` / `Hide all`)
-* **R** to reset the view
+Then drag `dist/LINQS Layout.app` to `/Applications`.
 
-How it stays fast: every polyline outline is flattened into a single `GL_LINES`
-batch and every circle into one instanced draw, uploaded to the GPU once. Each
-vertex carries only a layer id; the **vertex shader** looks up that layer's color
-and visibility from small uniform arrays — so showing/hiding a layer is a one-float
-uniform write with no buffer rebuild, and recoloring is free. The renderer
-(`viewer/scene.py`) is context-agnostic: the same code drives the interactive
-window and the headless `create_standalone_context()` PNG path used for tests.
+## Using it
 
-```python
-from pydxf import DxfLayout
+- **Open a layout** — double-click a `.dxf` (after the app is installed it's the
+  default opener), or **File ▸ Open…**, or drag a `.dxf` onto the window.
+- **Pan / zoom** — drag to pan, scroll to zoom at the cursor, **R** to reset.
+- **Layers** — the right panel lists every layer; click to show/hide, or use
+  **Show all / Hide all**.
+- **Measure** — click **Measure** (or **M**), then click two points; the distance
+  and Δx/Δy appear. Points snap to the nearest corner (vertex/center) or edge;
+  hold **Shift** to constrain to horizontal/vertical. **Esc** clears.
+- **Fill** (**F**) toggles translucent polygon fill; **Light bg** (**B**) toggles
+  the background.
 
-doc = DxfLayout("TOPO06.dxf")
-doc.n_polylines, doc.n_vertices, doc.n_circles   # 163447, 6058058, 83190
-doc.layers                                       # ['BigChip', 'Chip1', ...]
-doc.bbox()                                       # overall extent
-doc.polyline(0)                                  # (n,2) float64 vertices, zero-copy
-doc.layer_summary()                              # per-layer counts + bboxes
-```
+| input | action |
+|---|---|
+| scroll | zoom at cursor |
+| drag | pan |
+| `R` | reset view |
+| click layer | show / hide |
+| `M` | measure tool |
+| `Shift` (measure) | constrain to H / V |
+| `F` | toggle fill |
+| `B` | toggle light/dark |
+| `Esc` | clear measurement |
 
-## Data model (validated against TOPO06.dxf)
+## Requirements
 
-The file is ASCII DXF R12 (`AC1009`): a strict stream of `(group-code, value)`
-line pairs. This layout has only a `HEADER` + `ENTITIES` section — **no
-BLOCKS/INSERT**, so geometry is fully flattened (no block transforms to resolve).
-Two 2-D primitives appear:
+macOS 12+ on Apple Silicon. The bundled app is self-contained (no Python install
+needed). Very large reference DXFs (hundreds of MB) load in well under a second.
 
-- **POLYLINE** — closed polygons of straight segments (a `VERTEX` run terminated
-  by `SEQEND`). No bulge (code 42), Z (30), or per-vertex width.
-- **CIRCLE** — center + radius.
+## Development
 
-The loader exposes these as **Structure-of-Arrays** (cache-friendly, vectorizable):
-
-| array | shape | meaning |
-|---|---|---|
-| `verts` | (N, 2) f64 | all polyline vertices, concatenated |
-| `poly_start` / `poly_count` | (P,) | CSR slice of `verts` for each polyline |
-| `poly_layer` | (P,) i32 | layer id per polyline |
-| `poly_flags` | (P,) u8 | DXF code-70 flags (bit0 = closed) |
-| `circ` | (C, 3) f64 | `[x, y, radius]` per circle |
-| `circ_layer` | (C,) i32 | layer id per circle |
-| `layers` | list[str] | layer names, indexed by layer id |
-
-Arrays are **zero-copy views** over buffers owned by the C++ core; the `DxfLayout`
-object keeps that memory alive and frees it on `close()` / GC. Use a `with` block
-or call `.close()` when done with a huge file.
-
-## Why it's fast
-
-- `mmap` + `MADV_SEQUENTIAL`; no line-object allocation, no `iostream`.
-- Single pass; group-code dispatch via a tiny state machine.
-- Custom fixed-format float parser (`[-]ddd.dddd`) with `strtod` fallback.
-- Output is SoA numpy with no Python-side per-entity objects.
-- Handles the file's whitespace-padded group codes (a real gotcha — naive
-  `code == "0"` matching silently undercounts).
-
-## Next steps toward DRC
-
-The SoA representation is the substrate for rule checks:
-
-1. **Spatial index** per layer (`shapely.STRtree`, available) for neighbor queries.
-2. **Width / spacing / enclosure / min-area** rules over polygons + circles.
-3. **Inter-layer** rules (e.g. electrode-to-waveguide clearance).
-4. Violation reporting with coordinates + an overlay viewer.
+This is the production branch. For the loader internals, renderer design, and
+contributor docs, see [`main`](../../tree/main) (`CLAUDE.md`, `FEATURES.md`).
