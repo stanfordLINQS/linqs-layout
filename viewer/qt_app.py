@@ -481,7 +481,7 @@ class MainWindow(QMainWindow):
             ("R", "Reset View", self.viewport.reset_view),
             ("F", "Toggle Fill", self.panel.fill_btn.toggle),
             ("G", "Toggle Grid", self.panel.grid_btn.toggle),
-            ("B", "Toggle Background", self.panel.bg_btn.toggle),
+            ("L", "Light / Dark", self.panel.bg_btn.toggle),
             ("M", "Measure", self.panel.measure_btn.toggle),
         ):
             act = QAction(label, self)

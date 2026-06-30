@@ -55,9 +55,9 @@ def stylesheet() -> str:
     }}
     QPushButton:hover {{ color: {accent}; }}
 
-    QCheckBox {{ color: {ink}; spacing: 9px; font-family: {MONO}; font-size: 12px; }}
+    QCheckBox {{ color: {ink}; spacing: 11px; font-family: {MONO}; font-size: 15px; }}
     QCheckBox::indicator {{
-        width: 12px; height: 12px; border: 1px solid {muted}; background: transparent;
+        width: 15px; height: 15px; border: 1px solid {muted}; background: transparent;
     }}
     QCheckBox::indicator:hover {{ border: 1px solid {accent}; }}
     QCheckBox::indicator:checked {{ background: {accent}; border: 1px solid {accent}; }}

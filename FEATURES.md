@@ -57,7 +57,7 @@ Status of `linqs-layout` capabilities. ✅ done · 🚧 in progress · ⬜ plann
 | `Esc` | clear measurement |
 | `F` | toggle polygon fill |
 | `G` | toggle background grid |
-| `B` | toggle light / dark background |
+| `L` | toggle light / dark background |
 | `R` | reset view to fit |
 
 ## Planned
