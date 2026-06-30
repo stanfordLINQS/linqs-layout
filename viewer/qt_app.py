@@ -29,34 +29,10 @@ from .camera import Camera2D
 from .offscreen import BG_DARK, BG_LIGHT
 from .palette import layer_colors
 from .scene import GLScene
+from .snap import Snapper
 
 _VIS_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _LID_ROLE = int(Qt.ItemDataRole.UserRole)
-
-
-class SnapIndex:
-    """Fast nearest-DXF-point lookup for the measuring tool (polyline vertices
-    and circle centers). Pre-splits coordinates so a query is a bbox mask + a
-    small argmin — a few ms over 6 M points, fine for click/hover."""
-
-    def __init__(self, layout):
-        v = np.ascontiguousarray(layout.verts, np.float32)
-        c = np.asarray(layout.circ, np.float32)
-        pts = v if len(c) == 0 else np.vstack([v, c[:, :2]])
-        self.x = np.ascontiguousarray(pts[:, 0])
-        self.y = np.ascontiguousarray(pts[:, 1])
-
-    def nearest(self, wx, wy, radius):
-        r = float(radius)
-        m = (np.abs(self.x - wx) < r) & (np.abs(self.y - wy) < r)
-        if not m.any():
-            return None
-        xs, ys = self.x[m], self.y[m]
-        d2 = (xs - wx) ** 2 + (ys - wy) ** 2
-        i = int(np.argmin(d2))
-        if d2[i] <= r * r:
-            return float(xs[i]), float(ys[i])
-        return None
 
 
 class MeasureOverlay(QWidget):
@@ -75,18 +51,32 @@ class MeasureOverlay(QWidget):
         chain = list(vp.measure_points)
         if len(chain) == 1 and vp.measure_cursor is not None:
             chain = [chain[0], vp.measure_cursor]
-        if not chain:
+        show_snap = vp.measure_mode and vp.snap_kind is not None and vp.measure_cursor is not None
+        if not chain and not show_snap:
             return
 
         cam = vp.cam
         light = vp.is_light()
         accent = QColor(230, 120, 0) if light else QColor(255, 150, 30)
+        snapcol = QColor(0, 150, 210) if light else QColor(60, 215, 255)
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         def to_s(pt):
             sx, sy = cam.world_to_screen(pt[0], pt[1])
             return QPointF(sx, sy)
+
+        # Live snap indicator under the cursor (square = corner, circle = edge).
+        if show_snap:
+            s = to_s(vp.measure_cursor)
+            p.setPen(QPen(snapcol, 1.6))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            if vp.snap_kind == "corner":
+                p.drawRect(int(s.x() - 6), int(s.y() - 6), 12, 12)
+                p.setBrush(snapcol)
+                p.drawEllipse(s, 1.6, 1.6)
+            else:
+                p.drawEllipse(s, 6, 6)
 
         if len(chain) == 2:
             pen = QPen(accent, 1.6)
@@ -145,7 +135,8 @@ class GLViewport(QOpenGLWidget):
         self.measure_mode = False
         self.measure_points: list[tuple[float, float]] = []
         self.measure_cursor = None
-        self.snap: SnapIndex | None = None      # built lazily — keeps startup fast
+        self.snap_kind = None                   # 'corner' | 'edge' | None (live)
+        self.snap: Snapper | None = None        # built lazily — keeps startup fast
         self.snap_px = 12
 
         self.overlay = MeasureOverlay(self)
@@ -182,11 +173,13 @@ class GLViewport(QOpenGLWidget):
         self.overlay.update()
 
     def _snap(self, px, py):
+        """Return (world_point, kind). kind is 'corner'/'edge'/None; the point is
+        the snapped location, or the raw cursor world position when nothing snaps."""
         if self.snap is None:
-            self.snap = SnapIndex(self._layout)
+            self.snap = Snapper(self._layout)
         wx, wy = self.cam.screen_to_world(px, py)
-        hit = self.snap.nearest(wx, wy, self.snap_px * self.cam.upp)
-        return hit if hit is not None else (wx, wy)
+        pt, kind = self.snap.snap(wx, wy, self.snap_px * self.cam.upp)
+        return (pt if pt is not None else (wx, wy)), kind
 
     # -- interaction ------------------------------------------------------
     def wheelEvent(self, e):
@@ -201,10 +194,10 @@ class GLViewport(QOpenGLWidget):
             return
         p = e.position()
         if self.measure_mode:
-            pt = self._snap(p.x(), p.y())
+            pt, kind = self._snap(p.x(), p.y())
+            self.measure_cursor, self.snap_kind = pt, kind
             if len(self.measure_points) != 1:        # 0 or 2 -> start over
                 self.measure_points = [pt]
-                self.measure_cursor = None
             else:
                 self.measure_points.append(pt)
             self._refresh()
@@ -214,9 +207,9 @@ class GLViewport(QOpenGLWidget):
     def mouseMoveEvent(self, e):
         p = e.position()
         if self.measure_mode:
-            if len(self.measure_points) == 1:
-                self.measure_cursor = self._snap(p.x(), p.y())
-                self.overlay.update()
+            # Live snap: always update the indicator under the cursor.
+            self.measure_cursor, self.snap_kind = self._snap(p.x(), p.y())
+            self.overlay.update()
             return
         if self._last is not None:
             self.cam.pan_pixels(p.x() - self._last[0], p.y() - self._last[1])
@@ -230,14 +223,18 @@ class GLViewport(QOpenGLWidget):
     # -- API for the panel / shortcuts -----------------------------------
     def set_measure_mode(self, on: bool):
         self.measure_mode = bool(on)
-        if on and self.snap is None:          # build the snap index up front, once
-            self.snap = SnapIndex(self._layout)
+        if on and self.snap is None:          # build the snapper up front, once
+            self.snap = Snapper(self._layout)
+        if not on:
+            self.snap_kind = None
         self.setMouseTracking(self.measure_mode)
         self.setCursor(Qt.CursorShape.CrossCursor if on else Qt.CursorShape.ArrowCursor)
+        self.overlay.update()
 
     def clear_measure(self):
         self.measure_points = []
         self.measure_cursor = None
+        self.snap_kind = None
         self.overlay.update()
 
     def set_fill(self, on: bool):
