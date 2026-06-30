@@ -7,7 +7,7 @@ devicePixelRatio handling."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from . import style
@@ -16,6 +16,14 @@ from .offscreen import BG_DARK, BG_LIGHT
 from .overlay import MeasureOverlay
 from .scene import GLScene, nice_grid_spacing
 from .snap import Snapper
+
+# Snapping (Snapper.snap) is a full-geometry numpy scan -- a few ms on large
+# layouts. Recomputing it synchronously on every raw mouse-move event (no
+# coalescing, unlike paint/update()) can fall behind the OS's mouse-move rate
+# and visibly lag/jump, especially where Windows delivers move events faster
+# than macOS's more aggressively-coalesced ones. Throttle to one recompute
+# per ~frame instead, always using the latest position.
+_MEASURE_THROTTLE_MS = 16
 
 
 class GLViewport(QOpenGLWidget):
@@ -39,6 +47,11 @@ class GLViewport(QOpenGLWidget):
         self.snap_kind = None                   # 'corner' | 'edge' | None (live)
         self.snap: Snapper | None = None        # built lazily — keeps startup fast
         self.snap_px = 12
+        self._pending_measure_move = None       # (px, py, shift) awaiting throttled snap
+        self._measure_move_timer = QTimer(self)
+        self._measure_move_timer.setSingleShot(True)
+        self._measure_move_timer.setInterval(_MEASURE_THROTTLE_MS)
+        self._measure_move_timer.timeout.connect(self._on_measure_move_timeout)
 
         self.status_sink = None                 # callable(str): bottom status strip
 
@@ -110,6 +123,20 @@ class GLViewport(QOpenGLWidget):
             pt = (sx, y0) if abs(sx - x0) >= abs(sy - y0) else (x0, sy)
         return pt, kind
 
+    def _apply_pending_measure_move(self):
+        """Run the throttled snap query for the latest pending cursor position."""
+        if self._pending_measure_move is None:
+            return
+        px, py, shift = self._pending_measure_move
+        self._pending_measure_move = None
+        self.measure_cursor, self.snap_kind = self._measure_point(px, py, shift)
+        self.overlay.update()
+
+    def _on_measure_move_timeout(self):
+        if self._pending_measure_move is not None:
+            self._apply_pending_measure_move()
+            self._measure_move_timer.start()    # keep throttling while moves keep coming
+
     # -- interaction ------------------------------------------------------
     def wheelEvent(self, e):
         steps = e.angleDelta().y() / 120.0
@@ -140,10 +167,14 @@ class GLViewport(QOpenGLWidget):
         p = e.position()
         self._emit_status(p.x(), p.y())
         if self.measure_mode:
-            # Live snap / ortho-constraint indicator under the cursor.
+            # Live snap / ortho-constraint indicator under the cursor. Throttled
+            # (see _MEASURE_THROTTLE_MS) since the snap query is too expensive to
+            # redo synchronously on every raw move event without falling behind.
             shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            self.measure_cursor, self.snap_kind = self._measure_point(p.x(), p.y(), shift)
-            self.overlay.update()
+            self._pending_measure_move = (p.x(), p.y(), shift)
+            if not self._measure_move_timer.isActive():
+                self._apply_pending_measure_move()      # immediate for the first event
+                self._measure_move_timer.start()        # then hold off briefly
             return
         if self._last is not None:
             self.cam.pan_pixels(p.x() - self._last[0], p.y() - self._last[1])
@@ -162,7 +193,12 @@ class GLViewport(QOpenGLWidget):
             self.snap = Snapper(self._layout)
         if not on:
             self.snap_kind = None
-        self.setMouseTracking(self.measure_mode)
+            self._pending_measure_move = None
+            self._measure_move_timer.stop()
+        # NOTE: mouse tracking is left permanently on (set once in __init__) for the
+        # always-live status-bar x/y -- it must not be tied to measure_mode here, or
+        # turning measure mode off again disables hover-move events (and therefore
+        # the status bar) for the rest of the session.
         self.setCursor(Qt.CursorShape.CrossCursor if on else Qt.CursorShape.ArrowCursor)
         self.overlay.update()
 
