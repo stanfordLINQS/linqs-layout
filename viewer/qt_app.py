@@ -18,11 +18,11 @@ import os
 
 import numpy as np
 from PySide6.QtCore import Qt, QPointF
-from PySide6.QtGui import (QColor, QFont, QIcon, QKeySequence, QPainter, QPen,
-                           QPixmap, QShortcut, QSurfaceFormat)
+from PySide6.QtGui import (QAction, QColor, QFont, QIcon, QKeySequence, QPainter,
+                           QPen, QPixmap, QShortcut)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
-                               QListWidget, QListWidgetItem, QPushButton,
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget,
+                               QListWidgetItem, QMainWindow, QPushButton,
                                QSplitter, QVBoxLayout, QWidget)
 
 from .camera import Camera2D
@@ -362,43 +362,67 @@ class LayerPanel(QWidget):
             self._vp.update()
 
 
-class MainWindow(QWidget):
-    def __init__(self, layout):
+class MainWindow(QMainWindow):
+    """One layout in one window: GL viewport + layer panel, a File/View menu, and
+    drag-and-drop of .dxf files. ``app`` (a ViewerApp) handles opening new files."""
+
+    def __init__(self, layout, app=None):
         super().__init__()
-        self.setWindowTitle(f"linqs-layout — {os.path.basename(layout.path)}")
         self._layout = layout
+        self._app = app
+        self.setWindowTitle(f"LINQS Layout — {os.path.basename(layout.path)}")
+        self.setAcceptDrops(True)
 
         self.viewport = GLViewport(layout)
         self.panel = LayerPanel(layout, self.viewport)
-
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.viewport)
         splitter.addWidget(self.panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
         splitter.setSizes([1140, 260])
-
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(splitter)
+        self.setCentralWidget(splitter)
         self.resize(1400, 1000)
 
-        QShortcut(QKeySequence("R"), self, self.viewport.reset_view)
-        QShortcut(QKeySequence("M"), self, self.panel.measure_btn.toggle)
-        QShortcut(QKeySequence("F"), self, self.panel.fill_btn.toggle)
-        QShortcut(QKeySequence("B"), self, self.panel.bg_btn.toggle)
+        self._build_menu()
         QShortcut(QKeySequence("Esc"), self, self.viewport.clear_measure)
 
+    def _build_menu(self):
+        bar = self.menuBar()
+        file_menu = bar.addMenu("File")
+        act_open = QAction("Open…", self)
+        act_open.setShortcut(QKeySequence.StandardKey.Open)
+        act_open.triggered.connect(self._open)
+        file_menu.addAction(act_open)
+        act_close = QAction("Close Window", self)
+        act_close.setShortcut(QKeySequence.StandardKey.Close)
+        act_close.triggered.connect(self.close)
+        file_menu.addAction(act_close)
 
-def run(layout) -> int:
-    """Open the interactive viewer for ``layout`` and block until closed."""
-    fmt = QSurfaceFormat()
-    fmt.setVersion(4, 1)
-    fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
-    fmt.setDepthBufferSize(0)
-    QSurfaceFormat.setDefaultFormat(fmt)
+        view_menu = bar.addMenu("View")
+        for key, label, fn in (
+            ("R", "Reset View", self.viewport.reset_view),
+            ("F", "Toggle Fill", self.panel.fill_btn.toggle),
+            ("B", "Toggle Background", self.panel.bg_btn.toggle),
+            ("M", "Measure", self.panel.measure_btn.toggle),
+        ):
+            act = QAction(label, self)
+            act.setShortcut(QKeySequence(key))
+            act.triggered.connect(fn)
+            view_menu.addAction(act)
 
-    app = QApplication.instance() or QApplication([])
-    win = MainWindow(layout)
-    win.show()
-    return app.exec()
+    def _open(self):
+        if self._app is not None:
+            self._app.prompt_open()
+
+    def dragEnterEvent(self, e):
+        urls = e.mimeData().urls() if e.mimeData().hasUrls() else []
+        if self._app is not None and any(u.toLocalFile().lower().endswith(".dxf") for u in urls):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        for u in e.mimeData().urls():
+            p = u.toLocalFile()
+            if p.lower().endswith(".dxf"):
+                self._app.open_path(p)
+                break

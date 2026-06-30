@@ -43,7 +43,7 @@ def main() -> int:
         return 0
 
     try:
-        from viewer.qt_app import run
+        from viewer.app import run
     except ImportError as e:
         print(f"\nViewer dependencies missing ({e}).\n"
               f"Install them with:\n  pip install -r {HERE / 'requirements-viewer.txt'}")

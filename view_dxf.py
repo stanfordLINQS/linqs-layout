@@ -40,7 +40,7 @@ def main() -> int:
               f"in {(time.perf_counter() - t1) * 1e3:.0f} ms")
         return 0
 
-    from viewer.qt_app import run
+    from viewer.app import run
     return run(layout)
 
 
