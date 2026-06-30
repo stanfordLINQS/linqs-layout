@@ -1,7 +1,7 @@
 // dxf_parse.cpp
-// Ultrafast parser for flattened ASCII DXF R11/R12 (AC1009) photonics layouts.
+// Ultrafast parser for flattened ASCII DXF R11/R12 (AC1009) layouts.
 //
-// Design notes / assumptions (validated against TOPO06.dxf, ~220 MB):
+// Design notes / assumptions (validated against layout.dxf, ~220 MB):
 //   * The file is a strict sequence of (group-code line, value line) pairs.
 //   * Group codes may be left-padded with spaces -> we trim before parsing.
 //   * Only HEADER + ENTITIES sections; no BLOCKS/INSERT -> geometry is flat.

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Lightning-fast layout viewer for flattened ASCII DXF photonics layouts.
+"""Lightning-fast layout viewer for flattened ASCII DXF layouts.
 
-    python3 view_dxf.py TOPO06.dxf              # interactive GPU viewer
-    python3 view_dxf.py TOPO06.dxf --png out.png   # headless render to PNG
+    python3 view_dxf.py layout.dxf              # interactive GPU viewer
+    python3 view_dxf.py layout.dxf --png out.png   # headless render to PNG
 
 Interactive controls: scroll to zoom at the cursor, left-drag to pan, click a
 layer in the right-hand panel to show/hide it, press R to reset the view.

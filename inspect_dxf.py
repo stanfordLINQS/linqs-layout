@@ -2,8 +2,8 @@
 """Inspect a flattened ASCII DXF layout: what's inside and where it sits.
 
 Usage:
-    python3 inspect_dxf.py TOPO06.dxf
-    python3 inspect_dxf.py TOPO06.dxf --json
+    python3 inspect_dxf.py layout.dxf
+    python3 inspect_dxf.py layout.dxf --json
 """
 
 from __future__ import annotations

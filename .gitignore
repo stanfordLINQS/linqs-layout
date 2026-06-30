@@ -16,7 +16,8 @@ __pycache__/
 
 # Local-only dev files (kept on the maintainer's machine, not in the public repo)
 CLAUDE.md
-view_topo06.py
+view_*.py
+!view_dxf.py
 
 # macOS
 .DS_Store

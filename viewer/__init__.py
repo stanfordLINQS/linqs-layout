@@ -1,4 +1,4 @@
-"""viewer — a lightning-fast GPU layout viewer for flattened DXF photonics layouts.
+"""viewer — a lightning-fast GPU layout viewer for flattened DXF layouts.
 
 Built on the zero-copy SoA arrays from :mod:`pydxf`. All geometry is uploaded to
 the GPU once as a single ``GL_LINES`` batch (polyline outlines) plus an instanced
