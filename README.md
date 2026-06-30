@@ -24,6 +24,7 @@ double-clicking it in Finder.
 | Drag | Pan |
 | `R` | Reset view |
 | Click a layer | Show / hide that layer |
+| `L` | Show / hide the layer panel |
 | `M` | Measuring tool |
 | `Shift` while measuring | Constrain to horizontal / vertical |
 | `F` | Toggle fill |
