@@ -61,11 +61,11 @@ Status of `linqs-layout` capabilities. ✅ done · 🚧 in progress · ⬜ plann
 | `L` | show / hide layer panel |
 | `R` | reset view to fit |
 
+- ✅ **Tabs** — each opened file is a tab in one window; switch, reorder, and close
+  tabs. The menu, status bar, and shortcuts act on the active tab.
+
 ## Planned
 
-- ⬜ **Tabs** — opening more than one file opens each in its own tab within a
-  single window (instead of a separate window per file), so multiple layouts are
-  open at once and you can switch between them.
 - ⬜ **Instant startup** — cache parsed geometry to a binary sidecar so launches
   skip re-parsing the 220 MB DXF.
 - ⬜ **DRC** — per-layer `shapely.STRtree` spatial index → width / spacing /
