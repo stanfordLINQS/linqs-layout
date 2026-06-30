@@ -256,6 +256,11 @@ class GLViewport(QOpenGLWidget):
             self.scene.show_fill = bool(on)
             self.update()
 
+    def set_grid(self, on: bool):
+        if self.scene is not None:
+            self.scene.show_grid = bool(on)
+            self.update()
+
     def set_background(self, light: bool):
         self._light = bool(light)
         self.bg = BG_LIGHT if light else BG_DARK
@@ -328,9 +333,12 @@ class LayerPanel(QWidget):
         self.fill_btn = QCheckBox("Fill")
         self.fill_btn.setChecked(True)            # fill is on by default
         self.fill_btn.toggled.connect(viewport.set_fill)
+        self.grid_btn = QCheckBox("Grid")
+        self.grid_btn.setChecked(True)            # grid is on by default
+        self.grid_btn.toggled.connect(viewport.set_grid)
         self.bg_btn = QCheckBox("Light background")
         self.bg_btn.toggled.connect(viewport.set_background)
-        for b in (self.measure_btn, self.fill_btn, self.bg_btn):
+        for b in (self.measure_btn, self.fill_btn, self.grid_btn, self.bg_btn):
             root.addWidget(b)
 
         hint = QLabel("Measure: click two points (snaps to the\nnearest vertex). Esc clears.")
@@ -402,6 +410,7 @@ class MainWindow(QMainWindow):
         for key, label, fn in (
             ("R", "Reset View", self.viewport.reset_view),
             ("F", "Toggle Fill", self.panel.fill_btn.toggle),
+            ("G", "Toggle Grid", self.panel.grid_btn.toggle),
             ("B", "Toggle Background", self.panel.bg_btn.toggle),
             ("M", "Measure", self.panel.measure_btn.toggle),
         ):
