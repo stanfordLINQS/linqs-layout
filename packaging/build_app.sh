@@ -34,7 +34,15 @@ rm -rf build "dist/LINQS Layout.app"
 $PY -m PyInstaller --noconfirm --clean packaging/LINQSLayout.spec
 
 echo "==> ad-hoc codesign (required to launch on Apple Silicon)"
-codesign --force --deep --sign - "dist/LINQS Layout.app"
+# codesign rejects the FinderInfo / fileprovider xattrs that iCloud-synced
+# folders stamp onto files, so sign a clean copy in a temp dir, then move it back.
+SIGN_TMP="$(mktemp -d)/LINQS Layout.app"
+ditto --noextattr --norsrc "dist/LINQS Layout.app" "$SIGN_TMP"
+xattr -cr "$SIGN_TMP" 2>/dev/null || true
+codesign --force --deep --sign - "$SIGN_TMP"
+rm -rf "dist/LINQS Layout.app"
+ditto "$SIGN_TMP" "dist/LINQS Layout.app"
+rm -rf "$(dirname "$SIGN_TMP")"
 
 echo ""
 echo "Built: dist/LINQS Layout.app"
