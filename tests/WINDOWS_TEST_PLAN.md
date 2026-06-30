@@ -240,6 +240,28 @@ iscc /DMyAppVersion=<version> packaging\windows\installer.iss
 
 **Pass:** clean per-user install, working shortcuts + association, clean uninstall.
 
+> **Silent-install gotcha:** running the setup exe with `/VERYSILENT` from an
+> account that *can* elevate (no `/CURRENTUSER` or `/ALLUSERS` given) installs
+> **per-machine** (`C:\Program Files`, HKLM) instead of per-user — `iscc`'s
+> dialog-override default picks admin when there's no dialog to ask. Pass
+> `/CURRENTUSER` explicitly to silently exercise the intended per-user path; an
+> interactive run is unaffected (its dialog defaults to "for me only"). Verified
+> on this branch: with `/CURRENTUSER`, install lands in
+> `%LocalAppData%\Programs\LINQS Layout` under `HKEY_CURRENT_USER`, no admin
+> token, both shortcuts launch the app, and uninstall removes the app dir, both
+> shortcuts, and the `LINQSLayout.dxf` progid / `OpenWithProgids` entry cleanly.
+>
+> **Double-click association note:** writing `OpenWithProgids` + the progid's
+> `shell\open\command` registers LINQS Layout as *available* for `.dxf` (it
+> shows up under "Open with"), but on Windows 10/11 the actual double-click
+> default is governed by the per-user `UserChoice` registry hash, which is
+> deliberately protected from silent installer takeover since Windows 8 — if
+> another app (e.g. KLayout) was already the chosen default, double-clicking a
+> `.dxf` keeps opening that app until the user manually switches it in Settings
+> ▸ Default apps. This is expected platform behavior, not an installer bug —
+> confirm registration via "Open with" rather than assuming double-click alone
+> proves it.
+
 ---
 
 ## 9. In-app updater (T9)
@@ -275,6 +297,31 @@ Check each:
 **Pass:** the download→quit→install→relaunch cycle completes and the version
 advances. Note: this is the least-tested path; capture any exception dialog.
 
+The non-GUI half of this (`_fetch_latest` version comparison, asset-suffix
+matching, and the two graceful-degradation paths) is automated:
+```bat
+python tests\test_updater.py
+```
+It mocks the GitHub API response for determinism (newer version + matching
+asset; newer version + *no* matching asset; network failure) and also makes
+one live call to confirm the real API is reachable. **Expected:** `RESULT:
+PASS`. It does not drive the GUI dialogs or actually install anything — that
+stays manual, per above.
+
+> **Verified on this branch:** the only published release at the time of
+> testing, `v1.0.9`, carries **only a `.dmg` asset — no `.exe`**, and the local
+> `viewer/__init__.py __version__` is also `1.0.9`. That means today, for real
+> users: (a) **Check for Updates → up to date** works correctly out of the box
+> (versions match, real API, no mocking needed), and (b) the **"no asset for
+> this OS" graceful path is exactly what's live in production right now** — a
+> Windows user on an older version who checks for updates would hit "Could not
+> download the update. Try the releases page on GitHub," not a working install,
+> because no Windows release has ever shipped a `.exe` asset. The success path
+> (download → quit → install → relaunch) has never been exercised end-to-end
+> and needs a real published release with a Windows asset attached to test —
+> that's a visible/shared action (publishing to the public repo), so it wasn't
+> done as part of this pass without separate sign-off.
+
 ---
 
 ## 10. Performance acceptance (T10)
@@ -292,6 +339,20 @@ On a real large DXF, record numbers and compare to the macOS reference
 
 **Pass:** all within the same ballpark as macOS. A regression here is a FAIL even
 if everything is functionally correct — speed is the product.
+
+> **Measured on this branch** (no ~200 MB fixture was available locally; used a
+> real flattened R10 DXF instead — a fair real-world proxy, just smaller than
+> the stress target):
+>
+> | metric | value |
+> |---|---|
+> | file | `TOPO01_ultrafast.dxf`, 24.9 MB, 39,405 polylines / 435,384 vertices / 24 circles / 7 layers |
+> | parse throughput | 556 MB/s (45 ms) — extrapolates to ~360 ms for 200 MB, within the ≤1 s target |
+> | first paint (parse + render) | 37 ms parse + 262 ms render ≈ 300 ms total, within the ≤1–2 s target |
+>
+> Pan/zoom feel, layer-toggle, and fill-toggle responsiveness are inherently
+> subjective and were not re-verified here — same caveat as the §5 GUI
+> checklist.
 
 ---
 
