@@ -2,9 +2,15 @@
 
 Uses the public GitHub REST API over plain HTTPS (``urllib``) — no GitHub CLI and
 no token, so it works for anyone (the repo's releases are public). The check and
-the download/install run on background threads; installing replaces
-``/Applications/LINQS Layout.app`` in place (macOS lets you replace a running
-bundle) and offers to relaunch, reopening the layouts that were open.
+the download run on background threads.
+
+Per-OS install strategy:
+  * macOS   — download the release ``.dmg`` and replace ``/Applications/LINQS
+              Layout.app`` in place (macOS lets you replace a running bundle),
+              then offer to relaunch, reopening the layouts that were open.
+  * Windows — download the release installer ``.exe`` and launch it; the running
+              app quits so the installer can replace files (and relaunch).
+  * other   — open the GitHub releases page in the browser.
 """
 
 from __future__ import annotations
@@ -14,8 +20,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.request
+import webbrowser
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
@@ -24,7 +32,12 @@ from . import __version__
 
 REPO = "stanfordLINQS/linqs-layout"
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
-INSTALL_PATH = "/Applications/LINQS Layout.app"
+RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
+
+_IS_MAC = sys.platform == "darwin"
+_IS_WIN = sys.platform.startswith("win")
+
+MAC_INSTALL_PATH = "/Applications/LINQS Layout.app"
 
 
 def current_version() -> str:
@@ -35,8 +48,19 @@ def _vt(s: str):
     return tuple(int(x) for x in re.findall(r"\d+", s or "")[:3])
 
 
+def _asset_suffix() -> str | None:
+    """The release asset filename suffix to install on this OS (None if unsupported)."""
+    if _IS_MAC:
+        return ".dmg"
+    if _IS_WIN:
+        return ".exe"
+    return None
+
+
 def _fetch_latest():
-    """Return (version, dmg_url) for the latest release, or (None, None)."""
+    """Return (version, asset_url) for the latest release on this OS, or (None, None).
+
+    ``asset_url`` is the OS-appropriate installer asset (``.dmg`` / ``.exe``)."""
     try:
         req = urllib.request.Request(
             API_LATEST,
@@ -44,9 +68,12 @@ def _fetch_latest():
         with urllib.request.urlopen(req, timeout=15) as r:
             data = json.load(r)
         ver = (data.get("tag_name") or "").lstrip("v") or None
-        dmg = next((a.get("browser_download_url") for a in data.get("assets", [])
-                    if str(a.get("name", "")).lower().endswith(".dmg")), None)
-        return ver, dmg
+        suf = _asset_suffix()
+        url = None
+        if suf:
+            url = next((a.get("browser_download_url") for a in data.get("assets", [])
+                        if str(a.get("name", "")).lower().endswith(suf)), None)
+        return ver, url
     except Exception:
         return None, None
 
@@ -55,7 +82,8 @@ def latest_version() -> str | None:
     return _fetch_latest()[0]
 
 
-def _download_and_install() -> bool:
+# -- macOS: in-place install of the .dmg --------------------------------------
+def _mac_install() -> bool:
     """Download the latest release DMG and install the .app into /Applications."""
     _ver, url = _fetch_latest()
     if not url:
@@ -75,9 +103,9 @@ def _download_and_install() -> bool:
             src = os.path.join(mnt, "LINQS Layout.app")
             if not os.path.isdir(src):
                 return False
-            subprocess.run(["rm", "-rf", INSTALL_PATH])
-            subprocess.run(["ditto", src, INSTALL_PATH], check=True)
-            subprocess.run(["xattr", "-dr", "com.apple.quarantine", INSTALL_PATH])
+            subprocess.run(["rm", "-rf", MAC_INSTALL_PATH])
+            subprocess.run(["ditto", src, MAC_INSTALL_PATH], check=True)
+            subprocess.run(["xattr", "-dr", "com.apple.quarantine", MAC_INSTALL_PATH])
             return True
         finally:
             subprocess.run(["hdiutil", "detach", mnt], capture_output=True)
@@ -87,9 +115,27 @@ def _download_and_install() -> bool:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# -- Windows: download the installer .exe (run after we quit) -----------------
+def _win_download() -> str | None:
+    """Download the latest release installer to a temp file; return its path.
+
+    The temp dir is intentionally NOT cleaned up here — the installer runs after
+    the app quits, so the file must outlive this process."""
+    _ver, url = _fetch_latest()
+    if not url:
+        return None
+    try:
+        tmp = tempfile.mkdtemp(prefix="linqs-update-")
+        dst = os.path.join(tmp, os.path.basename(url) or "LINQS-Layout-Setup.exe")
+        urllib.request.urlretrieve(url, dst)
+        return dst
+    except Exception:
+        return None
+
+
 def _open_paths(window) -> list[str]:
     """The layout file paths currently open in ``window`` (empty for the welcome
-    screen), so relaunch can reopen them."""
+    screen), so relaunch can reopen them (macOS)."""
     tabs = getattr(window, "tabs", None)
     if tabs is None:
         return []
@@ -102,7 +148,8 @@ def _open_paths(window) -> list[str]:
 
 
 def _relaunch(paths=None):
-    args = ["open", "-n", INSTALL_PATH]
+    """Relaunch the freshly installed macOS app, reopening ``paths``."""
+    args = ["open", "-n", MAC_INSTALL_PATH]
     if paths:
         args += ["--args", *paths]          # reopen the current layouts
     subprocess.Popen(args)
@@ -117,10 +164,16 @@ class _CheckThread(QThread):
 
 
 class _InstallThread(QThread):
-    result = Signal(bool)
+    # macOS: "ok" on success; Windows: the installer path; "" on failure.
+    result = Signal(str)
 
     def run(self):
-        self.result.emit(_download_and_install())
+        if _IS_MAC:
+            self.result.emit("ok" if _mac_install() else "")
+        elif _IS_WIN:
+            self.result.emit(_win_download() or "")
+        else:
+            self.result.emit("")
 
 
 def check_for_updates(window, silent: bool = False):
@@ -143,6 +196,16 @@ def check_for_updates(window, silent: bool = False):
                     window, "Up to date",
                     f"LINQS Layout {current_version()} is the latest version.")
             return
+        # No in-app installer for this OS → send them to the releases page.
+        if _asset_suffix() is None:
+            if QMessageBox.question(
+                    window, "Update available",
+                    f"LINQS Layout {latest} is available — you have "
+                    f"{current_version()}.\n\nOpen the releases page?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            ) == QMessageBox.StandardButton.Yes:
+                webbrowser.open(RELEASES_PAGE)
+            return
         if QMessageBox.question(
                 window, "Update available",
                 f"LINQS Layout {latest} is available — you have {current_version()}.\n\n"
@@ -156,24 +219,39 @@ def check_for_updates(window, silent: bool = False):
 
 
 def _install(window, latest):
-    dlg = QProgressDialog(f"Downloading LINQS Layout {latest}…", None, 0, 0, window)
+    msg = "Downloading installer…" if _IS_WIN else f"Downloading LINQS Layout {latest}…"
+    dlg = QProgressDialog(msg, None, 0, 0, window)
     dlg.setWindowModality(Qt.WindowModality.WindowModal)
     dlg.setMinimumDuration(0)
     inst = _InstallThread(window)
     window.__update_install = inst    # keep a reference alive
 
-    def done(ok):
+    def done(result):
         dlg.close()
-        if ok and QMessageBox.question(
-                window, "Update installed",
-                f"Updated to {latest}. Relaunch now?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        ) == QMessageBox.StandardButton.Yes:
-            _relaunch(_open_paths(window))
-        elif not ok:
+        if not result:
             QMessageBox.warning(
                 window, "Update failed",
-                "Could not install the update. Try the releases page on GitHub.")
+                "Could not download the update. Try the releases page on GitHub.")
+            return
+        if _IS_MAC:
+            if QMessageBox.question(
+                    window, "Update installed",
+                    f"Updated to {latest}. Relaunch now?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            ) == QMessageBox.StandardButton.Yes:
+                _relaunch(_open_paths(window))
+        elif _IS_WIN:
+            if QMessageBox.question(
+                    window, "Install update",
+                    f"The {latest} installer is ready. Run it now?\n\n"
+                    "LINQS Layout will close so the update can be applied.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            ) == QMessageBox.StandardButton.Yes:
+                try:
+                    os.startfile(result)            # type: ignore[attr-defined]
+                except Exception:
+                    webbrowser.open(RELEASES_PAGE)
+                QApplication.quit()
 
     inst.result.connect(done)
     inst.start()
