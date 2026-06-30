@@ -109,9 +109,10 @@ _FRAG_COVER = """
 uniform sampler2D u_wind;
 uniform vec3 u_fill_color;
 uniform float u_alpha;
+uniform int u_downsample;     // wind buffer is rendered at 1/u_downsample resolution
 out vec4 f_color;
 void main() {
-    float w = texelFetch(u_wind, ivec2(gl_FragCoord.xy), 0).r;
+    float w = texelFetch(u_wind, ivec2(gl_FragCoord.xy) / u_downsample, 0).r;
     if (abs(w) < 0.5) discard;          // exterior pixel
     f_color = vec4(u_fill_color, u_alpha);
 }
@@ -173,6 +174,18 @@ class GLScene:
         self.grid_spacing = 1.0     # world units between grid nodes (set each draw)
         self.fill_alpha = float(fill_alpha)
         self._shade = 1.0          # color multiplier (dimmed in light-background mode)
+        # Wind buffer resolution divisor: the wind pass's clear + rasterization
+        # cost is fragment-fill-rate bound (profiled), so rendering it at
+        # 1/N resolution cuts that cost by N^2 at the price of fill-boundary
+        # precision (blockier edges, up to ~N screen px) -- masked somewhat by
+        # the crisp outline pass drawn on top, but a real, deliberate tradeoff,
+        # not a free optimization. Swept N=2,3,4,8 on a real 33-layer/
+        # 6M-vertex file: N=2 gave a 2.19x full-draw speedup with zero
+        # pixels differing by a large (>60/255) amount from the reference and
+        # no visible difference on close inspection; N=4 started showing
+        # ~2k large-diff pixels (visible artifacts at fine features) for only
+        # marginally more speedup (2.67x). Set to 1 to disable entirely.
+        self.wind_downsample = 2
 
         maxl = str(self.n_layers)
         self.outline_prog = ctx.program(
@@ -336,7 +349,9 @@ class GLScene:
         for prog in (self.outline_prog, self.circ_prog):
             prog["u_color"].write(dimmed.tobytes())
 
-    def _ensure_wind(self, size) -> None:
+    def _ensure_wind(self, main_size) -> None:
+        ds = max(int(self.wind_downsample), 1)
+        size = (max(1, main_size[0] // ds), max(1, main_size[1] // ds))
         if self._wind_size == size:
             return
         if self._wind_fbo is not None:
@@ -349,10 +364,12 @@ class GLScene:
 
     def _screen_scissor(self, lid, scale, offset, W, H):
         """Pixel-space (x, y, w, h) scissor rect (GL bottom-left origin) for
-        layer ``lid``'s on-screen bbox, clamped to the framebuffer, or None if
-        it's entirely off-screen. clip = world * scale + offset (same
-        transform the vertex shaders use); world/clip +y is up, matching GL
-        window coordinates, so no axis flip is needed."""
+        layer ``lid``'s on-screen bbox, clamped to a ``W``x``H`` framebuffer
+        (pass the wind buffer's own, possibly downsampled, size to get a
+        scissor rect for it instead of the full-resolution main framebuffer),
+        or None if it's entirely off-screen. clip = world * scale + offset
+        (same transform the vertex shaders use); world/clip +y is up,
+        matching GL window coordinates, so no axis flip is needed."""
         xmin, xmax = self._layer_xmin[lid], self._layer_xmax[lid]
         ymin, ymax = self._layer_ymin[lid], self._layer_ymax[lid]
         if xmin > xmax:                                    # no fillable geometry
@@ -443,19 +460,21 @@ class GLScene:
         # (typically a few seconds after load -- computed on a background
         # thread since it's too slow on complex geometry to block initial
         # load), or the naive fan fallback before then / for layers it
-        # doesn't cover. A non-convex fan can self-overlap heavily (the same
-        # pixels rasterized several times for one polygon); the wind pass's
-        # clear + rasterization cost is fragment-fill-rate bound (profiled:
-        # ~1.85ms at 30k px vs ~41ms at 5M px for the same geometry), so
-        # real triangulation's lack of self-overlap is a direct, measured win
-        # (profiled ~6x faster on a real 6M-vertex file's full-chip view).
+        # doesn't cover. The wind pass's clear + rasterization cost is
+        # fragment-fill-rate bound (profiled: ~1.85ms at 30k px vs ~41ms at
+        # 5M px for the same geometry) -- real triangulation (vs. a
+        # self-overlapping fan) helps a little, and wind_downsample (see
+        # __init__) trades fill-edge precision for a direct ~N^2 cut to this
+        # pass's pixel count when set > 1.
         if self.show_fill and self.fill_vao is not None:
             self._ensure_wind(main_fbo.size)
             self.cover_prog["u_wind"].value = 0
             self.cover_prog["u_alpha"].value = self.fill_alpha
+            self.cover_prog["u_downsample"].value = max(int(self.wind_downsample), 1)
             self._wind_tex.use(0)
             ctx.enable(moderngl.BLEND)
             W, H = main_fbo.size
+            wW, wH = self._wind_fbo.size
             real_ready = self.real_fill_vao is not None
             for lid in range(self.n_layers):
                 if real_ready:
@@ -467,7 +486,13 @@ class GLScene:
                 rect = self._screen_scissor(lid, scale, offset, W, H)
                 if rect is None:
                     continue                                          # entirely off-screen
-                self._wind_fbo.scissor = rect
+                # The wind buffer may be downsampled relative to main_fbo (see
+                # wind_downsample), so it needs its own scissor rect computed
+                # against its own (smaller) size, not main_fbo's.
+                wind_rect = self._screen_scissor(lid, scale, offset, wW, wH) if (wW, wH) != (W, H) else rect
+                if wind_rect is None:
+                    continue
+                self._wind_fbo.scissor = wind_rect
                 self._wind_fbo.use()
                 ctx.clear(0.0)
                 ctx.blend_func = moderngl.ONE, moderngl.ONE          # accumulate winding

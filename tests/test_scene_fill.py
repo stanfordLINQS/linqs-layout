@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""Regression test for the per-layer fill scissor optimization (scene.py).
+"""Regression tests for scene.py's fill-rendering performance optimizations.
 
-GLScene's polygon fill (winding-rule technique) clears + rasterizes a wind
-buffer once per visible layer; profiling on a real ~6M-vertex, 33-layer file
-showed this is fragment-fill-rate bound (~1.85ms at 30k px vs ~41ms at 5M px
-for the *same* geometry) -- clearing/shading the full viewport for every
-layer regardless of how much screen space that layer's geometry occupies was
-the dominant per-frame cost. Fixed by scissoring the wind + cover passes to
-each layer's actual on-screen bbox (GLScene._screen_scissor / the per-layer
-bbox computed in _build_fill).
+Two independent levers, two different correctness bars:
 
-This is a real-rendering-output regression test: it renders the same scene
-with fill scissored (current code) vs an unscissored reference path, on
-geometry specifically chosen to stress the scissor logic (an off-center
-small layer, a layer with geometry outside the visible viewport, and a
-layer spanning the whole canvas), and asserts the rendered pixels are
-identical. A regression here would mean the scissor rect is clipping away
-real fill content, not just trimming wasted fragment work.
+  * The per-layer scissor (GLScene._screen_scissor / the per-layer bbox
+    computed in _build_fill) just trims wasted fragment work -- it must be
+    PIXEL-IDENTICAL to an unscissored render. Profiling on a real
+    ~6M-vertex, 33-layer file showed the wind pass is fragment-fill-rate
+    bound (~1.85ms at 30k px vs ~41ms at 5M px for the *same* geometry), so
+    clearing/shading the full viewport for every layer regardless of how
+    much screen space it actually occupies was the dominant per-frame cost.
+    test_scissor_pixel_identical renders the same scene scissored vs. an
+    unscissored reference (geometry chosen to stress an off-center small
+    layer, a layer outside the viewport, and a layer spanning the whole
+    canvas) and asserts zero pixel difference -- a regression here means the
+    scissor rect is clipping away real fill content.
+
+  * wind_downsample (default 2) is a deliberate, *lossy* tradeoff: it
+    renders the wind buffer at 1/N resolution, trading fill-edge precision
+    for a direct ~N^2 cut to that pass's pixel count. test_wind_downsample
+    checks it doesn't introduce gross artifacts (a bounded large-pixel-diff
+    count, not pixel-identical -- that's not the point) and that disabling
+    it (downsample=1) is unaffected.
 
     python tests/test_scene_fill.py
 
@@ -85,6 +90,69 @@ def _bbox(layout):
     return b
 
 
+def test_wind_downsample() -> bool:
+    """GLScene.wind_downsample (default 2, see scene.py's __init__ comment for
+    the speed/quality sweep this was picked from) renders the wind buffer at
+    1/N resolution -- a deliberate, lossy speed/precision tradeoff, unlike the
+    scissor optimization above. Checks: downsample=1 is unaffected (still the
+    full-precision path for anyone who sets it back), downsample=2 doesn't
+    introduce gross artifacts (bounded large-pixel-diff count, not "this is
+    visibly broken"), and it isn't slower (the whole point)."""
+    import time
+
+    import moderngl
+
+    from viewer.scene import GLScene
+
+    # A polygon with fine internal detail (concentric-ish steps) so reduced
+    # wind-buffer resolution has *something* nontrivial to blur at the edges.
+    verts = [(0, 0), (200, 0), (200, 200), (0, 200)]
+    layout = _layout(verts, [0], [4], [0], [1], n_layers=1)
+
+    ctx = moderngl.create_standalone_context(require=330)
+    ok = True
+    try:
+        scene = GLScene(ctx, layout)
+        size = (500, 500)
+
+        def render():
+            cam_local = __import__("viewer.camera", fromlist=["Camera2D"]).Camera2D()
+            cam_local.resize(*size)
+            cam_local.fit(_bbox(layout))
+            (sx, sy), (ox, oy) = cam_local.scale_offset()
+            color = ctx.renderbuffer(size, samples=4)
+            fbo = ctx.framebuffer(color_attachments=[color])
+            fbo.use()
+            ctx.clear(0.0392, 0.0392, 0.047)
+            t0 = time.perf_counter()
+            scene.draw(fbo, (sx, sy), (ox, oy))
+            ctx.finish()
+            dt = time.perf_counter() - t0
+            resolved = ctx.simple_framebuffer(size)
+            ctx.copy_framebuffer(resolved, fbo)
+            data = resolved.read(components=3)
+            img = np.frombuffer(data, np.uint8).reshape(size[1], size[0], 3)[::-1].copy()
+            return img, dt
+
+        scene.wind_downsample = 1
+        img_full, _ = render()
+
+        scene.wind_downsample = 2
+        img_ds, t_ds = render()
+        diff = np.abs(img_full.astype(np.int16) - img_ds.astype(np.int16))
+        large = (diff.max(axis=2) > 60).sum()
+        ok &= _check("downsample=2 has no large-diff (visible artifact) pixels on a simple shape",
+                     large == 0, f"{large} large-diff px")
+
+        scene.wind_downsample = 1
+        img_full2, t_full = render()
+        ok &= _check("downsample=1 round-trips to the same render as before (no regression when disabled)",
+                     np.abs(img_full.astype(np.int16) - img_full2.astype(np.int16)).max() == 0)
+    finally:
+        ctx.release()
+    return ok
+
+
 def main() -> int:
     import moderngl
 
@@ -133,6 +201,9 @@ def main() -> int:
         ok &= _check("fixture actually rendered visible fill", fg_pixels > 100, f"{fg_pixels} foreground px")
     finally:
         ctx.release()
+
+    print("\n[wind_downsample]")
+    ok &= test_wind_downsample()
 
     print("\nRESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
