@@ -69,13 +69,14 @@ class MeasureOverlay(QWidget):
             return
         length = g / vp.cam.upp                       # one grid cell, in logical px
         x0, y0 = 18.0, self.height() - 18.0
-        amber = style.qcolor(style.ACCENT)
-        p.setPen(QPen(amber, 1.5))
+        # Neutral, high-contrast against the background (not the amber accent).
+        col = QColor(20, 20, 25) if vp.is_light() else style.qcolor(style.INK)
+        p.setPen(QPen(col, 1.5))
         p.drawLine(QPointF(x0, y0), QPointF(x0 + length, y0))
         p.drawLine(QPointF(x0, y0 - 4), QPointF(x0, y0 + 4))
         p.drawLine(QPointF(x0 + length, y0 - 4), QPointF(x0 + length, y0 + 4))
         p.setFont(_mono(10, True))
-        p.setPen(amber)
+        p.setPen(col)
         p.drawText(QPointF(x0, y0 - 8), _format_dist(g))
 
     def paintEvent(self, _e):
