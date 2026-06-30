@@ -9,6 +9,22 @@ Two parts are done: **(1) an ultrafast DXF loader** that reads a large flattened
 DXF and exposes its geometry as numpy, and **(2) a GPU layout viewer** built on
 those arrays. Design-rule checks (DRC), by analogy to PCB/IC DRC, are future work.
 
+## Speed is of the utmost importance
+
+**This is the prime directive. No speed can EVER be sacrificed in this project.**
+Speed is the whole reason this tool exists — every feature must stay instant /
+real-time, and a change that regresses load time, frame rate, or interaction
+latency is not acceptable, even if it's simpler or adds capability.
+
+- The DXF parse, the GPU render, and every interaction must stay real-time **on a
+  single core** — no required multiprocessing. The user has explicitly rejected
+  trading latency for convenience (e.g. the earcut + parallel fill was thrown out
+  and replaced with a single-core GPU winding-number fill).
+- Prefer GPU / vectorized / SoA approaches; never add per-entity Python loops in a
+  hot path. Resolve per-layer state in shaders (uniform writes), not buffer rebuilds.
+- **Measure before and after** any hot-path change (offscreen render timing, fps,
+  parse ms). If something costs speed, find another way — don't ship the regression.
+
 ## Architecture
 
 ```
