@@ -141,7 +141,7 @@ void main() {
 """
 
 _GRID_TARGET_PX = 78.0      # aim for ~this on-screen spacing between dots
-_GRID_DOT_PX = 1.3          # dot radius in pixels
+_GRID_DOT_PX = 1.6          # dot radius in pixels
 
 
 def _nice_spacing(raw: float) -> float:
@@ -332,8 +332,8 @@ class GLScene:
             gp["u_viewport"].value = (float(W), float(H))
             gp["u_spacing"].value = _nice_spacing(upp * _GRID_TARGET_PX)
             gp["u_upp"].value = upp
-            gp["u_dot_color"].value = (0.34, 0.36, 0.42) if self._shade >= 1.0 else (0.55, 0.55, 0.60)
-            gp["u_dot_alpha"].value = 0.5
+            gp["u_dot_color"].value = (0.46, 0.49, 0.57) if self._shade >= 1.0 else (0.42, 0.42, 0.50)
+            gp["u_dot_alpha"].value = 0.7
             gp["u_dot_px"].value = _GRID_DOT_PX
             main_fbo.use()
             ctx.enable(moderngl.BLEND)
