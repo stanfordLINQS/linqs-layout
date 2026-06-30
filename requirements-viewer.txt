@@ -1,0 +1,6 @@
+# Extra dependencies for the GPU layout viewer (view_dxf.py / viewer/).
+# The core loader (pydxf, inspect_dxf.py) needs only numpy.
+numpy>=2.0
+moderngl>=5.10        # GPU rendering (OpenGL 3.3+ core)
+PySide6>=6.5          # interactive window + layer panel
+Pillow>=10.0          # PNG output for the headless renderer

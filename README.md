@@ -1,17 +1,21 @@
-# photonics-drc
+# linqs-layout
 
-Design-rule-check (DRC) tooling for photonic-integrated-circuit layouts, by
-analogy to PCB/IC DRC. **Step 1 (done): an ultrafast loader** that reads a large
-flattened DXF layout and lets you inspect what's inside and where it sits.
+Ultrafast tooling for **photonic-integrated-circuit layouts** in flattened DXF:
+a loader that turns a giant layout into numpy in a few hundred milliseconds, a
+GPU viewer that draws all of it at interactive framerates, and (next) design-rule
+checks by analogy to PCB/IC DRC.
 
 On the reference file (`TOPO06.dxf`, 220 MB / 6.06 M vertices):
 
 ```
 Parsed in 290 ms  (~760 MB/s)     # full geometry, not just a scan
+Viewer: 6 M segments + 83 k circles uploaded once, redrawn every frame on the GPU
 ```
 
 That's ~27× faster than a bare `awk` *counting* pass, and it materializes every
 vertex, polyline, and circle into numpy arrays ready for geometric analysis.
+
+![overview](docs/overview.png)
 
 ## Layout of the project
 
@@ -20,6 +24,8 @@ dxfcore/dxf_parse.cpp   C++ core: mmap + single-pass parse -> Structure-of-Array
 dxfcore/build.sh        builds libdxfcore.dylib with clang++
 pydxf/loader.py         ctypes binding -> zero-copy numpy views + DxfLayout API
 inspect_dxf.py          CLI: summarize a layout (counts, extent, per-layer table)
+view_dxf.py             CLI: interactive GPU viewer / headless PNG render
+viewer/                 moderngl scene + ortho camera + PySide6 window
 ```
 
 ## Quick start
@@ -29,6 +35,29 @@ bash dxfcore/build.sh            # build the native core once
 python3 inspect_dxf.py TOPO06.dxf
 python3 inspect_dxf.py TOPO06.dxf --json   # machine-readable
 ```
+
+## Layout viewer
+
+A GPU-accelerated viewer that renders the whole chip and stays interactive.
+
+```bash
+pip install -r requirements-viewer.txt
+python3 view_dxf.py TOPO06.dxf                 # interactive window
+python3 view_dxf.py TOPO06.dxf --png out.png   # headless render to PNG (no display)
+```
+
+* **scroll** to zoom in / out, centered on the cursor
+* **left-drag** to pan
+* **right-hand layer panel** — click a layer to show / hide it (`Show all` / `Hide all`)
+* **R** to reset the view
+
+How it stays fast: every polyline outline is flattened into a single `GL_LINES`
+batch and every circle into one instanced draw, uploaded to the GPU once. Each
+vertex carries only a layer id; the **vertex shader** looks up that layer's color
+and visibility from small uniform arrays — so showing/hiding a layer is a one-float
+uniform write with no buffer rebuild, and recoloring is free. The renderer
+(`viewer/scene.py`) is context-agnostic: the same code drives the interactive
+window and the headless `create_standalone_context()` PNG path used for tests.
 
 ```python
 from pydxf import DxfLayout

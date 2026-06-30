@@ -1,13 +1,13 @@
 # CLAUDE.md
 
-Guidance for working in `photonics-drc`. Read this before editing.
+Guidance for working in `linqs-layout`. Read this before editing.
 
 ## What this project is
 
-Design-rule-check (DRC) tooling for **photonic integrated circuit layouts**, by
-analogy to PCB/IC DRC. **Step 1 (done): an ultrafast DXF loader** that reads a
-large flattened DXF and exposes its geometry as numpy for analysis. DRC rule
-checks themselves are future work.
+Ultrafast tooling for **photonic integrated circuit layouts** in flattened DXF.
+Two parts are done: **(1) an ultrafast DXF loader** that reads a large flattened
+DXF and exposes its geometry as numpy, and **(2) a GPU layout viewer** built on
+those arrays. Design-rule checks (DRC), by analogy to PCB/IC DRC, are future work.
 
 ## Architecture
 
@@ -19,11 +19,20 @@ pydxf/loader.py         ctypes binding. Wraps the C buffers as ZERO-COPY numpy
                         views; DxfLayout keeps the handle alive, frees on close/GC.
 pydxf/__init__.py       exports DxfLayout, load
 inspect_dxf.py          CLI summarizer (counts, extent, per-layer table, --json)
-TOPO06.dxf              reference layout (220 MB; not source — do not edit)
+view_dxf.py             CLI: interactive viewer / headless --png render
+viewer/scene.py         moderngl renderer: 1 GL_LINES batch (all polyline outlines)
+                        + 1 instanced circle pass; layer color+visibility in-shader.
+                        Context-agnostic — same code for the window and offscreen.
+viewer/camera.py        orthographic pan + zoom-at-cursor (world<->pixel mapping)
+viewer/palette.py       distinct per-layer colors (vectorized HSV, no matplotlib)
+viewer/offscreen.py     standalone-context render-to-PNG (headless; the render test)
+viewer/qt_app.py        PySide6 window: QOpenGLWidget viewport + layer-panel sidebar
+TOPO06.dxf              reference layout (220 MB; gitignored; not source — do not edit)
 ```
 
 Data flows one way: C++ parses → fills `std::vector`s in `DxfDoc` → Python builds
-numpy views over `.data()` pointers. No per-entity Python objects.
+numpy views over `.data()` pointers → the viewer copies those into GPU buffers
+once. No per-entity Python objects.
 
 ## Commands
 
@@ -31,6 +40,8 @@ numpy views over `.data()` pointers. No per-entity Python objects.
 bash dxfcore/build.sh                       # rebuild native core after editing the .cpp
 python3 inspect_dxf.py TOPO06.dxf           # human summary
 python3 inspect_dxf.py TOPO06.dxf --json    # machine-readable
+python3 view_dxf.py TOPO06.dxf              # interactive GPU viewer
+python3 view_dxf.py TOPO06.dxf --png o.png  # headless render (works without a display)
 ```
 
 There is no test runner yet; `inspect_dxf.py` on `TOPO06.dxf` is the smoke test.
@@ -73,6 +84,13 @@ Structure-of-Arrays exposed by `DxfLayout`:
   loads the prebuilt `.dylib`.
 - Toolchain here: clang++ (C++17) is available; **Rust is not installed**. numpy
   2.4 and shapely 2.1 (incl. `STRtree`) are available for downstream DRC.
+- Viewer stack: moderngl 5.12 (OpenGL **4.1 core** on Apple Silicon), PySide6,
+  Pillow. The render core (`viewer/scene.py`) is context-agnostic, so it is tested
+  **headlessly** via `moderngl.create_standalone_context(require=330)` rendering to
+  an FBO — no window needed (`python3 -m viewer.offscreen TOPO06.dxf -o out.png`).
+  The interactive window itself needs a real display and can't run under the Qt
+  `offscreen` platform plugin. Layer show/hide is done in the vertex shader (a
+  per-layer `u_visible` uniform), never by rebuilding the geometry buffers.
 - Keep the design SoA + vectorized; avoid introducing per-entity Python objects in
   hot paths.
 
