@@ -224,15 +224,18 @@ class GLViewport(QOpenGLWidget):
         return (pt if pt is not None else (wx, wy)), kind
 
     def _measure_point(self, px, py, shift):
-        """Point for the measuring tool. With Shift held while placing the second
-        point, constrain it to horizontal or vertical from the first point."""
+        """Point for the measuring tool. Snapping (corner/edge) always applies;
+        with Shift held while placing the second point, the snapped point is then
+        constrained to horizontal or vertical from the first point (so the locked
+        axis still picks up the snapped vertex/edge coordinate)."""
+        pt, kind = self._snap(px, py)
         if shift and len(self.measure_points) == 1:
-            wx, wy = self.cam.screen_to_world(px, py)
             x0, y0 = self.measure_points[0]
-            if abs(wx - x0) >= abs(wy - y0):
-                return (wx, y0), "ortho"          # horizontal lock
-            return (x0, wy), "ortho"              # vertical lock
-        return self._snap(px, py)
+            sx, sy = pt
+            if abs(sx - x0) >= abs(sy - y0):
+                return (sx, y0), "ortho"          # horizontal lock (snapped x)
+            return (x0, sy), "ortho"              # vertical lock (snapped y)
+        return pt, kind
 
     # -- interaction ------------------------------------------------------
     def wheelEvent(self, e):
