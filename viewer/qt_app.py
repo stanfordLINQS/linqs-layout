@@ -65,7 +65,7 @@ class GLViewport(QOpenGLWidget):
         self.ctx.clear(*BG)
         if self.scene is not None:
             (sx, sy), (ox, oy) = self.cam.scale_offset()
-            self.scene.draw((sx, sy), (ox, oy))
+            self.scene.draw(fbo, (sx, sy), (ox, oy))
 
     # -- interaction ------------------------------------------------------
     def wheelEvent(self, e):

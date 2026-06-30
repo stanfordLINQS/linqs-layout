@@ -38,7 +38,7 @@ def render_array(layout, size=(1600, 1400), visible=None, bg=BG) -> np.ndarray:
         msaa = ctx.framebuffer(color_attachments=[color])
         msaa.use()
         ctx.clear(*bg)
-        scene.draw((sx, sy), (ox, oy))
+        scene.draw(msaa, (sx, sy), (ox, oy))
 
         resolved = ctx.simple_framebuffer((w, h))
         ctx.copy_framebuffer(resolved, msaa)

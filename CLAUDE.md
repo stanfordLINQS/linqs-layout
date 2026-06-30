@@ -20,9 +20,11 @@ pydxf/loader.py         ctypes binding. Wraps the C buffers as ZERO-COPY numpy
 pydxf/__init__.py       exports DxfLayout, load
 inspect_dxf.py          CLI summarizer (counts, extent, per-layer table, --json)
 view_dxf.py             CLI: interactive viewer / headless --png render
-viewer/scene.py         moderngl renderer: 1 GL_LINES batch (all polyline outlines)
-                        + 1 instanced circle pass; layer color+visibility in-shader.
-                        Context-agnostic — same code for the window and offscreen.
+viewer/scene.py         moderngl renderer. Outlines: 1 GL_LINES batch + instanced
+                        circle loops. Fill: NO triangulation — per-layer winding-
+                        number fill (fan -> R32F additive -> cover pass) so concave
+                        polygons fill correctly; ~70 ms single-core fan-index build,
+                        real-time. Layer color+visibility in-shader. Context-agnostic.
 viewer/camera.py        orthographic pan + zoom-at-cursor (world<->pixel mapping)
 viewer/palette.py       distinct per-layer colors (vectorized HSV, no matplotlib)
 viewer/offscreen.py     standalone-context render-to-PNG (headless; the render test)
