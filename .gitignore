@@ -9,6 +9,12 @@
 *.so
 *.o
 *.a
+*.dll
+*.lib
+*.exp
+*.obj
+*.ilk
+*.pdb
 
 # Python
 __pycache__/
