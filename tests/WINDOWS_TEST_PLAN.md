@@ -136,8 +136,17 @@ remote-desktop session that forces software GL.
 
 ---
 
-## 5. Interactive viewer (T5) — manual GUI checklist
+## 5. Interactive viewer (T5)
 
+The functional half (everything except "feels smooth") is automated:
+```bat
+python tests\test_interactive.py
+```
+It drives the real `MainWindow` with synthesized `QTest` key/mouse events on
+a real GL surface against `tests\sample.dxf`, asserting state and writing
+screenshots to a temp dir after each step. **Expected:** `RESULT: PASS`.
+
+For the manual/feel pass, or to look at the app yourself:
 ```bat
 python app_main.py path\to\large.dxf
 ```
@@ -166,14 +175,8 @@ Verify each (✓/✗), watching for any lag:
 
 **Pass:** every box checked and nothing feels slow.
 
-> **Verified on this branch** (functional behavior, not "feel" -- see below):
-> all items above were driven programmatically (synthesized key/mouse events
-> via `QTest` on the real `MainWindow`, real GL surface, `tests/sample.dxf`)
-> with screenshots/state asserts after each step -- scroll-zoom, drag-pan, `R`
-> reset, layer-row click toggling visibility, `L` panel show/hide, `F`/`G`/`B`
-> toggles, `M` measure mode (snap, two points, Shift-constrain, `Esc` clear),
-> status bar x/y, the Keybindings dialog, and tab add/switch/reorder/close
-> (including closing the last tab). All passed.
+> **Verified on this branch** via `test_interactive.py` (functional behavior,
+> not "feel" -- see below): every item above passed.
 >
 > **Methodology note:** `QWidget.grab()` on the `MainWindow` does *not*
 > reliably reflect the live `QOpenGLWidget` content -- it can return a stale
