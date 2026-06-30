@@ -51,7 +51,8 @@ class MeasureOverlay(QWidget):
         chain = list(vp.measure_points)
         if len(chain) == 1 and vp.measure_cursor is not None:
             chain = [chain[0], vp.measure_cursor]
-        show_snap = vp.measure_mode and vp.snap_kind is not None and vp.measure_cursor is not None
+        show_snap = (vp.measure_mode and vp.snap_kind in ("corner", "edge")
+                     and vp.measure_cursor is not None)
         if not chain and not show_snap:
             return
 
@@ -181,6 +182,17 @@ class GLViewport(QOpenGLWidget):
         pt, kind = self.snap.snap(wx, wy, self.snap_px * self.cam.upp)
         return (pt if pt is not None else (wx, wy)), kind
 
+    def _measure_point(self, px, py, shift):
+        """Point for the measuring tool. With Shift held while placing the second
+        point, constrain it to horizontal or vertical from the first point."""
+        if shift and len(self.measure_points) == 1:
+            wx, wy = self.cam.screen_to_world(px, py)
+            x0, y0 = self.measure_points[0]
+            if abs(wx - x0) >= abs(wy - y0):
+                return (wx, y0), "ortho"          # horizontal lock
+            return (x0, wy), "ortho"              # vertical lock
+        return self._snap(px, py)
+
     # -- interaction ------------------------------------------------------
     def wheelEvent(self, e):
         steps = e.angleDelta().y() / 120.0
@@ -194,7 +206,8 @@ class GLViewport(QOpenGLWidget):
             return
         p = e.position()
         if self.measure_mode:
-            pt, kind = self._snap(p.x(), p.y())
+            shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            pt, kind = self._measure_point(p.x(), p.y(), shift)
             self.measure_cursor, self.snap_kind = pt, kind
             if len(self.measure_points) != 1:        # 0 or 2 -> start over
                 self.measure_points = [pt]
@@ -207,8 +220,9 @@ class GLViewport(QOpenGLWidget):
     def mouseMoveEvent(self, e):
         p = e.position()
         if self.measure_mode:
-            # Live snap: always update the indicator under the cursor.
-            self.measure_cursor, self.snap_kind = self._snap(p.x(), p.y())
+            # Live snap / ortho-constraint indicator under the cursor.
+            shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self.measure_cursor, self.snap_kind = self._measure_point(p.x(), p.y(), shift)
             self.overlay.update()
             return
         if self._last is not None:

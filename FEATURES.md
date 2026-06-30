@@ -21,9 +21,11 @@ Status of `linqs-layout` capabilities. ✅ done · 🚧 in progress · ⬜ plann
   `R` resets to fit.
 - ✅ **Layer panel** — right-hand list; click a layer to show/hide; Show all /
   Hide all. Color/visibility resolved in-shader (toggle = one uniform write).
-- ✅ **Measuring tool** (`M`) — click two points to read distance + Δx/Δy. Each
-  endpoint **snaps to the nearest DXF vertex / circle center** within ~12 px. The
-  measurement is anchored in world space (tracks through pan/zoom); `Esc` clears.
+- ✅ **Measuring tool** (`M`) — click two points to read distance + Δx/Δy. A live
+  snap indicator follows the cursor (square = corner, circle = edge); each point
+  **snaps to the nearest DXF corner** (vertex/center), falling back to the nearest
+  point on an **edge**. Hold **Shift** to constrain the second point to horizontal/
+  vertical. Anchored in world space (tracks through pan/zoom); `Esc` clears.
 - ✅ **Light / dark background** (`B`) — toggles background; layer colors dim on
   light for contrast.
 - ✅ **Headless render** — `view_dxf.py --png` / `viewer/offscreen.py` render to a
@@ -40,6 +42,7 @@ Status of `linqs-layout` capabilities. ✅ done · 🚧 in progress · ⬜ plann
 | click layer row | show / hide layer |
 | `M` | toggle measuring tool |
 | click ×2 (measure) | place two snapped points → distance |
+| `Shift` (measure) | constrain 2nd point to horizontal / vertical |
 | `Esc` | clear measurement |
 | `F` | toggle polygon fill |
 | `B` | toggle light / dark background |
