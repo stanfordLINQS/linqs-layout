@@ -166,6 +166,30 @@ Verify each (✓/✗), watching for any lag:
 
 **Pass:** every box checked and nothing feels slow.
 
+> **Verified on this branch** (functional behavior, not "feel" -- see below):
+> all items above were driven programmatically (synthesized key/mouse events
+> via `QTest` on the real `MainWindow`, real GL surface, `tests/sample.dxf`)
+> with screenshots/state asserts after each step -- scroll-zoom, drag-pan, `R`
+> reset, layer-row click toggling visibility, `L` panel show/hide, `F`/`G`/`B`
+> toggles, `M` measure mode (snap, two points, Shift-constrain, `Esc` clear),
+> status bar x/y, the Keybindings dialog, and tab add/switch/reorder/close
+> (including closing the last tab). All passed.
+>
+> **Methodology note:** `QWidget.grab()` on the `MainWindow` does *not*
+> reliably reflect the live `QOpenGLWidget` content -- it can return a stale
+> backing-store frame for the GL canvas specifically (the rest of the window
+> chrome grabs fine). The `B` light/dark toggle looked broken in an initial
+> screenshot (GL canvas still black, overlay text gone low-contrast) purely
+> from this; `QOpenGLWidget.grabFramebuffer()` (reads the real framebuffer
+> directly) plus a manual pixel sample confirmed the actual render is correct
+> in both modes (background clears to the right color; fill color shifts
+> correctly; `overlay.py`'s scale bar explicitly branches its pen color on
+> `vp.is_light()` for contrast). If re-verifying visually, grab the viewport
+> via `grabFramebuffer()`, not the window via `grab()`.
+>
+> Smoothness/stutter-free feel was not assessed (inherently needs a human
+> watching in real time) -- everything else on the checklist is now verified.
+
 ---
 
 ## 6. File-open entry points (T6)
