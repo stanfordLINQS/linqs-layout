@@ -21,6 +21,7 @@
 # Python
 __pycache__/
 *.pyc
+.venv/
 
 # Local-only dev files (kept on the maintainer's machine, not in the public repo)
 CLAUDE.md

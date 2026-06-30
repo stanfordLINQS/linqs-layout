@@ -105,29 +105,34 @@ but slow parse is a FAIL — capture the MB/s number.
 ## 3. Python / viewer imports (T3)
 
 ```bat
-python -c "import pydxf, viewer.app, viewer.window, viewer.style, viewer.update; print('imports ok')"
-python -c "import viewer.style as s; print(s.MONO_FAMILY, '|', s.key_label('O'))"
+python tests\test_imports.py
 ```
-**Expected:** `imports ok`; font prints `Consolas`; shortcut label prints
-`Ctrl+O` (not `⌘O`). **Pass:** both succeed with the Windows-specific values.
+**Expected output** ends with `RESULT: PASS`. Asserts the full viewer package
+tree imports cleanly and the per-OS style tokens resolve correctly: font is
+`Consolas`, shortcut label is `Ctrl+O` (not `⌘O`). **Pass:** `RESULT: PASS`.
 
 ---
 
 ## 4. Headless GPU render (T4)
 
 ```bat
-python -m viewer.offscreen tests\sample.dxf -o sample.png
+python tests\test_render.py
 python view_dxf.py path\to\large.dxf --png large.png
 ```
-**Expected:** both write a PNG; `sample.png` shows two outlined polygons + two
-circles on the dark canvas; `large.png` shows the layout. Render time is printed
-and is real-time (tens to low-hundreds of ms).
+**Expected:** `test_render.py` prints `RESULT: PASS` — it renders the sample
+fixture through the real moderngl standalone-context path and asserts the
+image is the right size/dtype, the background pixel matches the canvas color,
+and a sane fraction of the canvas is covered by the two polygons + two circles
+(catches both a blank canvas and a corrupted draw), then round-trips a PNG
+through PIL. Separately, `large.png` shows the real layout; render time is
+printed and should be real-time (tens to low-hundreds of ms).
 
-**Pass:** PNGs are produced and visually correct. **If it errors** with a context
-/ GL version failure, capture the full traceback — this is the moderngl
-standalone-context path (`create_standalone_context`) and the most likely
-GPU/driver-specific failure. Confirm the NVIDIA OpenGL driver is installed and
-that you are **not** on a remote-desktop session that forces software GL.
+**Pass:** `test_render.py` → `RESULT: PASS`, and `large.png` is visually
+correct. **If it errors** with a context / GL version failure, capture the
+full traceback — this is the moderngl standalone-context path
+(`create_standalone_context`) and the most likely GPU/driver-specific failure.
+Confirm the NVIDIA OpenGL driver is installed and that you are **not** on a
+remote-desktop session that forces software GL.
 
 ---
 
@@ -165,12 +170,22 @@ Verify each (✓/✗), watching for any lag:
 
 ## 6. File-open entry points (T6)
 
-- [ ] **argv:** `python app_main.py tests\sample.dxf` opens that file directly.
-- [ ] **Drag-drop:** drag a `.dxf` from Explorer onto the window → opens.
-- [ ] **No-arg:** `python app_main.py` shows the welcome screen with
-      `Press  Ctrl+O  to open a DXF file` (white on black). Closing it quits.
+```bat
+python tests\test_entrypoints.py
+```
+**Expected:** `RESULT: PASS` — this automates the **argv** path (opens
+`tests\sample.dxf` directly into a tab titled `LINQS Layout — sample.dxf`) and
+the **no-arg** path (shows the welcome screen with the `Ctrl+O` hint), each
+driven through a real Qt event loop + real GL surface in its own subprocess,
+with a watchdog so a GL/window-setup failure reports `FAIL` instead of
+hanging. Real windows briefly appear and self-close — this needs the same
+real GPU target as §4/§5, not a headless/offscreen box.
 
-**Pass:** all three work. (Double-click association is tested in §8 after install.)
+- [ ] **Drag-drop** (not automated — needs a real OS drag gesture): drag a
+      `.dxf` from Explorer onto the window → opens.
+
+**Pass:** `test_entrypoints.py` → `RESULT: PASS`, and drag-drop works.
+(Double-click association is tested in §8 after install.)
 
 ---
 
