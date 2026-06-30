@@ -21,9 +21,9 @@ from PySide6.QtCore import Qt, QPointF
 from PySide6.QtGui import (QAction, QColor, QFont, QIcon, QKeySequence, QPainter,
                            QPen, QPixmap, QShortcut)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QMainWindow, QPushButton,
-                               QSplitter, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel,
+                               QListWidget, QListWidgetItem, QMainWindow,
+                               QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from .camera import Camera2D
 from .offscreen import BG_DARK, BG_LIGHT
@@ -321,15 +321,14 @@ class LayerPanel(QWidget):
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         root.addWidget(sep)
-        self.measure_btn = QPushButton("Measure")
-        self.measure_btn.setCheckable(True)
+        # Checkboxes (not checkable push buttons): on macOS a checkable button
+        # gives no visible checked state, so a default-on toggle looks off.
+        self.measure_btn = QCheckBox("Measure")
         self.measure_btn.toggled.connect(viewport.set_measure_mode)
-        self.fill_btn = QPushButton("Fill")
-        self.fill_btn.setCheckable(True)
-        self.fill_btn.setChecked(True)
+        self.fill_btn = QCheckBox("Fill")
+        self.fill_btn.setChecked(True)            # fill is on by default
         self.fill_btn.toggled.connect(viewport.set_fill)
-        self.bg_btn = QPushButton("Light background")
-        self.bg_btn.setCheckable(True)
+        self.bg_btn = QCheckBox("Light background")
         self.bg_btn.toggled.connect(viewport.set_background)
         for b in (self.measure_btn, self.fill_btn, self.bg_btn):
             root.addWidget(b)
