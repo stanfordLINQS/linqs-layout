@@ -18,19 +18,7 @@ On first launch, right-click the app and choose **Open** to confirm it.
 Open a `.dxf` file with **File ▸ Open…**, by dragging it onto the window, or by
 double-clicking it in Finder.
 
-| Input | Action |
-|---|---|
-| Scroll | Zoom at the cursor |
-| Drag | Pan |
-| `R` | Reset view |
-| Click a layer | Show / hide that layer |
-| `L` | Show / hide the layer panel |
-| `M` | Measuring tool |
-| `Shift` while measuring | Constrain to horizontal / vertical |
-| `F` | Toggle fill |
-| `G` | Toggle grid |
-| `B` | Toggle background |
-| `Esc` | Clear measurement |
+Keyboard shortcuts are listed in the app under **File ▸ Keybindings**.
 
 ## Requirements
 
