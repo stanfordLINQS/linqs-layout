@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from pydxf import DxfLayout
 
-from .qt_app import MainWindow
+from .qt_app import MainWindow, WelcomeWindow
 
 
 def _configure_format():
@@ -37,6 +37,7 @@ class ViewerApp(QApplication):
         self.setApplicationDisplayName("LINQS Layout")
         self.setOrganizationName("Stanford LINQS")
         self._windows: list[MainWindow] = []
+        self._welcome = None
 
     # macOS delivers double-clicked / "Open With" files as a FileOpen event.
     def event(self, e):
@@ -57,11 +58,21 @@ class ViewerApp(QApplication):
         win.activateWindow()
         self._windows.append(win)
         win.destroyed.connect(lambda *_: self._forget(win))
+        if self._welcome is not None:           # a file opened -> retire the welcome screen
+            self._welcome.close()
+            self._welcome = None
         return win
 
     def _forget(self, win):
         if win in self._windows:
             self._windows.remove(win)
+
+    def show_welcome(self):
+        if self._welcome is None:
+            self._welcome = WelcomeWindow(self)
+        self._welcome.show()
+        self._welcome.raise_()
+        self._welcome.activateWindow()
 
     def prompt_open(self) -> bool:
         path, _ = QFileDialog.getOpenFileName(
@@ -97,12 +108,13 @@ def main(argv=None) -> int:
         if arg.lower().endswith(".dxf"):
             app.open_path(arg)
 
-    # If nothing opened (and no macOS FileOpen event arrives shortly), prompt.
-    def _maybe_prompt():
-        if app.windows_open == 0 and not app.prompt_open() and app.windows_open == 0:
-            app.quit()
+    # If nothing opened (and no macOS FileOpen event arrives shortly), show the
+    # welcome screen. Closing it (without opening a file) quits the app.
+    def _welcome_if_idle():
+        if app.windows_open == 0:
+            app.show_welcome()
 
-    QTimer.singleShot(250, _maybe_prompt)
+    QTimer.singleShot(250, _welcome_if_idle)
     return app.exec()
 
 

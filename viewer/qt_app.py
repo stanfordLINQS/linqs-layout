@@ -15,6 +15,7 @@ Controls
 from __future__ import annotations
 
 import os
+import sys
 
 import numpy as np
 from PySide6.QtCore import Qt, QPointF
@@ -38,6 +39,16 @@ _LID_ROLE = int(Qt.ItemDataRole.UserRole)
 def _format_dist(v: float) -> str:
     """Format a layout distance (assumed microns) as µm / mm."""
     return f"{v / 1000.0:g} mm" if v >= 1000.0 else f"{v:g} µm"
+
+
+def _icon_path():
+    """Path to the app icon PNG, in both source and frozen (.app) layouts."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        p = os.path.join(sys._MEIPASS, "icon.png")
+    else:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        p = os.path.join(root, "packaging", "icon.png")
+    return p if os.path.exists(p) else None
 
 
 class MeasureOverlay(QWidget):
@@ -467,6 +478,71 @@ class MainWindow(QMainWindow):
     def dragEnterEvent(self, e):
         urls = e.mimeData().urls() if e.mimeData().hasUrls() else []
         if self._app is not None and any(u.toLocalFile().lower().endswith(".dxf") for u in urls):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        for u in e.mimeData().urls():
+            p = u.toLocalFile()
+            if p.lower().endswith(".dxf"):
+                self._app.open_path(p)
+                break
+
+
+class WelcomeWindow(QMainWindow):
+    """Default startup screen: prompts to open a DXF (⌘O), via dialog or drop."""
+
+    def __init__(self, app):
+        super().__init__()
+        self._app = app
+        self.setWindowTitle("LINQS Layout")
+        self.setAcceptDrops(True)
+        self.resize(700, 480)
+
+        central = QWidget()
+        v = QVBoxLayout(central)
+        v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.setSpacing(14)
+
+        icon = _icon_path()
+        if icon:
+            logo = QLabel()
+            logo.setPixmap(QPixmap(icon).scaled(
+                132, 132, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+            logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            v.addWidget(logo)
+
+        title = QLabel("LINQS Layout")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 30px; font-weight: 600;")
+        v.addWidget(title)
+
+        hint = QLabel("Press  ⌘O  to open a DXF file")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setStyleSheet("font-size: 16px; color: palette(mid);")
+        v.addWidget(hint)
+
+        btn = QPushButton("Open…")
+        btn.setFixedWidth(140)
+        btn.clicked.connect(lambda: self._app.prompt_open())
+        v.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        drop = QLabel("or drag a .dxf file here")
+        drop.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop.setStyleSheet("font-size: 12px; color: palette(mid);")
+        v.addWidget(drop)
+
+        self.setCentralWidget(central)
+
+        file_menu = self.menuBar().addMenu("File")
+        act_open = QAction("Open…", self)
+        act_open.setShortcut(QKeySequence.StandardKey.Open)
+        act_open.triggered.connect(lambda: self._app.prompt_open())
+        file_menu.addAction(act_open)
+
+    def dragEnterEvent(self, e):
+        urls = e.mimeData().urls() if e.mimeData().hasUrls() else []
+        if any(u.toLocalFile().lower().endswith(".dxf") for u in urls):
             e.acceptProposedAction()
 
     def dropEvent(self, e):

@@ -36,6 +36,8 @@ Status of `linqs-layout` capabilities. ✅ done · 🚧 in progress · ⬜ plann
   PNG with no display (also the render smoke test).
 - ✅ **One-click launch** — `view_topo06.py` opens the viewer on TOPO06 via the ▶
   Run button, no arguments.
+- ✅ **Welcome screen** — launching the app with no file shows a start screen
+  (icon + "Press ⌘O to open a DXF file") with Open dialog and drag-drop.
 
 ## Keyboard / mouse
 
