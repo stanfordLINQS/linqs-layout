@@ -216,17 +216,22 @@ class DxfLayout:
 
     def layer_summary(self) -> list["LayerStats"]:
         """Per-layer counts and bounding boxes, sorted by total object count."""
-        out = []
-        # Vectorized per-layer vertex bbox via the polyline->layer map, expanded
-        # to vertices, then reduced with np.add.reduceat-style grouping.
         pl = np.asarray(self.poly_layer, dtype=np.int64)
         cl = np.asarray(self.circ_layer, dtype=np.int64)
-        # Expand polyline layer id to each of its vertices.
-        if self.n_polylines:
-            vert_layer = np.repeat(pl, np.asarray(self.poly_count, dtype=np.int64))
-        else:
-            vert_layer = np.empty(0, dtype=np.int64)
 
+        # Per-polyline bbox in ONE pass over the CSR-ordered vertices (reduceat),
+        # then aggregate by layer over the P polylines — never a full N-vertex scan
+        # per layer (that was O(layers x verts), the dominant cost on the open path).
+        if self.n_polylines:
+            start = np.asarray(self.poly_start, dtype=np.int64)
+            vx = np.ascontiguousarray(self.verts[:, 0])
+            vy = np.ascontiguousarray(self.verts[:, 1])
+            pxmin = np.minimum.reduceat(vx, start)
+            pxmax = np.maximum.reduceat(vx, start)
+            pymin = np.minimum.reduceat(vy, start)
+            pymax = np.maximum.reduceat(vy, start)
+
+        out = []
         for lid, name in enumerate(self.layers):
             pmask = pl == lid
             cmask = cl == lid
@@ -234,10 +239,8 @@ class DxfLayout:
             n_circ = int(cmask.sum())
             xs, ys = [], []
             if n_poly:
-                vmask = vert_layer == lid
-                vx = self.verts[vmask, 0]; vy = self.verts[vmask, 1]
-                if vx.size:
-                    xs += [vx.min(), vx.max()]; ys += [vy.min(), vy.max()]
+                xs += [pxmin[pmask].min(), pxmax[pmask].max()]
+                ys += [pymin[pmask].min(), pymax[pmask].max()]
             if n_circ:
                 c = self.circ[cmask]
                 xs += [(c[:, 0] - c[:, 2]).min(), (c[:, 0] + c[:, 2]).max()]
