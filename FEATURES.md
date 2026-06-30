@@ -28,6 +28,8 @@ Status of `linqs-layout` capabilities. ✅ done · 🚧 in progress · ⬜ plann
   vertical. Anchored in world space (tracks through pan/zoom); `Esc` clears.
 - ✅ **Background dot grid** (`G`) — procedural CAD-style dot grid behind the
   geometry; spacing snaps to nice 1/2/5 values as you zoom.
+- ✅ **Scale bar** — bottom-left, one grid cell long, labeled in µm/mm; tracks the
+  grid spacing through zoom.
 - ✅ **Light / dark background** (`B`) — toggles background; layer colors dim on
   light for contrast.
 - ✅ **Headless render** — `view_dxf.py --png` / `viewer/offscreen.py` render to a

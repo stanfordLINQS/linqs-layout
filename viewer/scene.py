@@ -155,6 +155,11 @@ def _nice_spacing(raw: float) -> float:
     return nice * base
 
 
+def nice_grid_spacing(upp: float) -> float:
+    """Grid/scale-bar spacing (world units) for a given units-per-pixel."""
+    return _nice_spacing(upp * _GRID_TARGET_PX)
+
+
 class GLScene:
     """GPU geometry + shaders for one layout. Construct inside an active context."""
 
@@ -165,6 +170,7 @@ class GLScene:
         self.visible = np.ones(self.n_layers, np.float32)
         self.show_fill = True
         self.show_grid = True
+        self.grid_spacing = 1.0     # world units between grid nodes (set each draw)
         self.fill_alpha = float(fill_alpha)
         self._shade = 1.0          # color multiplier (dimmed in light-background mode)
 
@@ -310,8 +316,12 @@ class GLScene:
         self._wind_fbo = self.ctx.framebuffer(color_attachments=[self._wind_tex])
         self._wind_size = size
 
-    def draw(self, main_fbo, scale, offset) -> None:
-        """Render into ``main_fbo`` (already bound + cleared by the caller)."""
+    def draw(self, main_fbo, scale, offset, grid_spacing=None) -> None:
+        """Render into ``main_fbo`` (already bound + cleared by the caller).
+
+        ``grid_spacing`` overrides the grid/scale-bar spacing (world units); pass
+        the camera-derived value so it matches the on-screen scale bar exactly.
+        """
         ctx = self.ctx
         scale = (float(scale[0]), float(scale[1]))
         offset = (float(offset[0]), float(offset[1]))
@@ -322,15 +332,18 @@ class GLScene:
         self.wind_prog["u_scale"].value = scale
         self.wind_prog["u_offset"].value = offset
 
+        # Grid spacing (also drives the on-screen scale bar) — computed every frame.
+        W, H = main_fbo.size
+        upp = 2.0 / (scale[0] * W)
+        self.grid_spacing = float(grid_spacing) if grid_spacing else _nice_spacing(upp * _GRID_TARGET_PX)
+
         # Pass 0: background dot grid (behind all geometry).
         if self.show_grid:
-            W, H = main_fbo.size
-            upp = 2.0 / (scale[0] * W)
             gp = self.grid_prog
             gp["u_scale"].value = scale
             gp["u_offset"].value = offset
             gp["u_viewport"].value = (float(W), float(H))
-            gp["u_spacing"].value = _nice_spacing(upp * _GRID_TARGET_PX)
+            gp["u_spacing"].value = self.grid_spacing
             gp["u_upp"].value = upp
             gp["u_dot_color"].value = (0.46, 0.49, 0.57) if self._shade >= 1.0 else (0.42, 0.42, 0.50)
             gp["u_dot_alpha"].value = 0.7
