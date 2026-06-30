@@ -133,6 +133,45 @@ def _win_download() -> str | None:
         return None
 
 
+def _ps_quote(s: str) -> str:
+    """Quote a string as a PowerShell single-quoted literal (doubling embedded
+    quotes is PowerShell's own escaping rule, distinct from cmd's)."""
+    return "'" + s.replace("'", "''") + "'"
+
+
+def _win_silent_install_and_relaunch(installer_path: str, reopen_paths: list[str]) -> None:
+    """Run the downloaded installer silently, then relaunch once it finishes.
+
+    A self-updater can't just run the installer and wait synchronously in this
+    process: Inno's CloseApplications will (correctly) close *this* running app
+    as part of replacing its own files, so anything blocking on the installer
+    here would deadlock. Instead, spawn a small detached helper script that
+    survives this process quitting -- it waits for the installer, then
+    relaunches the app from its (now-updated) install location, reopening
+    whatever was open before.
+
+    The relaunch step uses PowerShell's Start-Process -ArgumentList (an actual
+    array, not a hand-quoted string) rather than cmd's ``start`` -- ``start``
+    has a long-documented quoting bug where a quoted program path followed by
+    further quoted arguments (needed here: file paths can contain spaces) gets
+    mis-tokenized into a single mangled, unrecognized command.
+    """
+    app_exe = sys.executable
+    tmp = tempfile.mkdtemp(prefix="linqs-update-")
+    bat = os.path.join(tmp, "apply_update.bat")
+    arg_list = ", ".join(_ps_quote(p) for p in reopen_paths)
+    relaunch = f"Start-Process -FilePath {_ps_quote(app_exe)}"
+    if arg_list:
+        relaunch += f" -ArgumentList @({arg_list})"
+    with open(bat, "w") as f:
+        f.write("@echo off\r\n")
+        f.write(f'"{installer_path}" /VERYSILENT /NORESTART /SUPPRESSMSGBOXES\r\n')
+        f.write(f'powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "{relaunch}"\r\n')
+    subprocess.Popen(
+        ["cmd", "/c", bat],
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
+
+
 def _open_paths(window) -> list[str]:
     """The layout file paths currently open in ``window`` (empty for the welcome
     screen), so relaunch can reopen them (macOS)."""
@@ -243,12 +282,13 @@ def _install(window, latest):
         elif _IS_WIN:
             if QMessageBox.question(
                     window, "Install update",
-                    f"The {latest} installer is ready. Run it now?\n\n"
-                    "LINQS Layout will close so the update can be applied.",
+                    f"The {latest} installer is ready. Install it now?\n\n"
+                    "LINQS Layout will close, update silently in the background, "
+                    "and relaunch automatically.",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             ) == QMessageBox.StandardButton.Yes:
                 try:
-                    os.startfile(result)            # type: ignore[attr-defined]
+                    _win_silent_install_and_relaunch(result, _open_paths(window))
                 except Exception:
                     webbrowser.open(RELEASES_PAGE)
                 QApplication.quit()

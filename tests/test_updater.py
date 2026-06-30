@@ -113,6 +113,76 @@ def test_mocked_responses() -> bool:
     return ok
 
 
+def test_ps_quote() -> bool:
+    """PowerShell single-quoted literal escaping: only ' needs doubling."""
+    from viewer import update
+
+    ok = True
+    ok &= _check("plain string", update._ps_quote("C:\\a\\b.exe"), "'C:\\a\\b.exe'")
+    ok &= _check("embedded single quote is doubled",
+                 update._ps_quote("C:\\O'Brien\\f.dxf"), "'C:\\O''Brien\\f.dxf'")
+    return ok
+
+
+def test_silent_install_and_relaunch() -> bool:
+    """End-to-end: spawn the real detached helper chain (a harmless real .exe
+    standing in for the installer, a tiny generated .bat standing in for the
+    relaunch target) and confirm it actually relaunches with the right args.
+
+    This is the regression test for a real bug caught during development: the
+    relaunch step originally used cmd's `start "" "<path>" "<arg>" ...`, which
+    has a documented quoting bug that mis-tokenizes a quoted program path
+    followed by further quoted arguments into one mangled, unrecognized
+    command -- it silently never relaunched. Fixed by using PowerShell's
+    Start-Process -ArgumentList (a real array) instead. Uses a real .exe
+    (not .bat) as the installer stand-in deliberately: a batch file invoking
+    another batch file without CALL never returns to the caller, which would
+    falsely fail this test for a reason that doesn't apply to the real Inno
+    Setup .exe installer.
+    """
+    import shutil
+    import tempfile
+    import time
+
+    from viewer import update
+
+    real_exe_installer = shutil.which("where.exe") or r"C:\Windows\System32\where.exe"
+    if not os.path.isfile(real_exe_installer):
+        print("  [skip] no stand-in exe found (where.exe missing?)")
+        return True
+
+    work = tempfile.mkdtemp(prefix="linqs-updater-test-")
+    marker = os.path.join(work, "relaunched.flag")
+    fake_app = os.path.join(work, "fake_app.bat")
+    with open(fake_app, "w") as f:
+        f.write("@echo off\r\n")
+        f.write(f'echo relaunched with: %* > "{marker}"\r\n')
+
+    spaced_dir = os.path.join(work, "dir with spaces")
+    os.makedirs(spaced_dir, exist_ok=True)
+    reopen_paths = [os.path.join(spaced_dir, "a layout.dxf")]
+
+    real_executable = sys.executable
+    sys.executable = fake_app
+    try:
+        update._win_silent_install_and_relaunch(real_exe_installer, reopen_paths)
+    finally:
+        sys.executable = real_executable
+
+    for _ in range(20):
+        if os.path.exists(marker):
+            break
+        time.sleep(0.25)
+
+    ok = _check("detached helper relaunched the app", os.path.exists(marker), True)
+    if os.path.exists(marker):
+        with open(marker) as f:
+            content = f.read()
+        ok &= _check("reopen path (with spaces) passed through correctly",
+                      reopen_paths[0] in content, True)
+    return ok
+
+
 def test_live_api() -> bool:
     """Light integration check against the real, public GitHub API."""
     from viewer import update
@@ -128,6 +198,10 @@ def test_live_api() -> bool:
 def main() -> int:
     print("[mocked responses]")
     ok = test_mocked_responses()
+    print("\n[ps quoting]")
+    ok &= test_ps_quote()
+    print("\n[silent install + relaunch]")
+    ok &= test_silent_install_and_relaunch()
     print("\n[live API]")
     ok &= test_live_api()
     print("\nRESULT:", "PASS" if ok else "FAIL")
