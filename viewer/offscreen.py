@@ -11,8 +11,11 @@ import numpy as np
 from .camera import Camera2D
 from .scene import GLScene
 
-# Dark background so the bright per-layer outlines pop.
-BG = (0.06, 0.06, 0.08)
+# Background presets. Dark makes the bright per-layer outlines pop; light mode
+# pairs with dimmed colors (see GLScene.set_shade) for print-friendly views.
+BG_DARK = (0.06, 0.06, 0.08)
+BG_LIGHT = (0.92, 0.92, 0.94)
+BG = BG_DARK
 
 
 def render_array(layout, size=(1600, 1400), visible=None, bg=BG) -> np.ndarray:

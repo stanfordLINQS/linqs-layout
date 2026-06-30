@@ -4,7 +4,11 @@ Controls
 --------
 * scroll wheel   zoom in / out, centered on the cursor
 * left-drag      pan
-* layer panel    click a layer row (right) to show / hide it
+* layer panel    click a layer row to show / hide it
+* Measure (M)    click two points; shows the distance. Each point snaps to the
+                 nearest DXF vertex/center if one is within ~12 px. Esc clears.
+* Fill (F)       toggle the translucent polygon fill
+* Light bg (B)   toggle light / dark background
 * R              reset view to fit
 """
 
@@ -12,16 +16,17 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import (QColor, QIcon, QKeySequence, QPainter, QPixmap,
-                           QShortcut, QSurfaceFormat)
+import numpy as np
+from PySide6.QtCore import Qt, QPointF
+from PySide6.QtGui import (QColor, QFont, QIcon, QKeySequence, QPainter, QPen,
+                           QPixmap, QShortcut, QSurfaceFormat)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QPushButton, QSplitter,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
+                               QListWidget, QListWidgetItem, QPushButton,
+                               QSplitter, QVBoxLayout, QWidget)
 
 from .camera import Camera2D
-from .offscreen import BG
+from .offscreen import BG_DARK, BG_LIGHT
 from .palette import layer_colors
 from .scene import GLScene
 
@@ -29,13 +34,102 @@ _VIS_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _LID_ROLE = int(Qt.ItemDataRole.UserRole)
 
 
-class GLViewport(QOpenGLWidget):
-    """QOpenGLWidget hosting a :class:`GLScene`, with pan + zoom-at-cursor.
+class SnapIndex:
+    """Fast nearest-DXF-point lookup for the measuring tool (polyline vertices
+    and circle centers). Pre-splits coordinates so a query is a bbox mask + a
+    small argmin — a few ms over 6 M points, fine for click/hover."""
 
-    All coordinates are kept in logical (device-independent) pixels; the camera
-    only depends on the viewport aspect ratio, so it renders correctly on Retina
-    displays without any explicit devicePixelRatio handling.
-    """
+    def __init__(self, layout):
+        v = np.ascontiguousarray(layout.verts, np.float32)
+        c = np.asarray(layout.circ, np.float32)
+        pts = v if len(c) == 0 else np.vstack([v, c[:, :2]])
+        self.x = np.ascontiguousarray(pts[:, 0])
+        self.y = np.ascontiguousarray(pts[:, 1])
+
+    def nearest(self, wx, wy, radius):
+        r = float(radius)
+        m = (np.abs(self.x - wx) < r) & (np.abs(self.y - wy) < r)
+        if not m.any():
+            return None
+        xs, ys = self.x[m], self.y[m]
+        d2 = (xs - wx) ** 2 + (ys - wy) ** 2
+        i = int(np.argmin(d2))
+        if d2[i] <= r * r:
+            return float(xs[i]), float(ys[i])
+        return None
+
+
+class MeasureOverlay(QWidget):
+    """Transparent HUD over the GL viewport: markers, the measured segment, and
+    the distance readout. Mouse-transparent so the viewport still gets clicks."""
+
+    def __init__(self, viewport):
+        super().__init__(viewport)
+        self._vp = viewport
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def paintEvent(self, _e):
+        vp = self._vp
+        chain = list(vp.measure_points)
+        if len(chain) == 1 and vp.measure_cursor is not None:
+            chain = [chain[0], vp.measure_cursor]
+        if not chain:
+            return
+
+        cam = vp.cam
+        light = vp.is_light()
+        accent = QColor(230, 120, 0) if light else QColor(255, 150, 30)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        def to_s(pt):
+            sx, sy = cam.world_to_screen(pt[0], pt[1])
+            return QPointF(sx, sy)
+
+        if len(chain) == 2:
+            pen = QPen(accent, 1.6)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.drawLine(to_s(chain[0]), to_s(chain[1]))
+
+        p.setPen(QPen(accent, 1.6))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for pt in chain:
+            s = to_s(pt)
+            p.drawLine(QPointF(s.x() - 6, s.y()), QPointF(s.x() + 6, s.y()))
+            p.drawLine(QPointF(s.x(), s.y() - 6), QPointF(s.x(), s.y() + 6))
+            p.drawEllipse(s, 4, 4)
+
+        if len(chain) == 2:
+            (x0, y0), (x1, y1) = chain
+            dx, dy = x1 - x0, y1 - y0
+            dist = (dx * dx + dy * dy) ** 0.5
+            txt = f"{dist:,.2f}   (Δx {dx:,.2f}, Δy {dy:,.2f})"
+            mid = to_s(((x0 + x1) / 2, (y0 + y1) / 2))
+            f = QFont()
+            f.setPointSize(11)
+            f.setBold(True)
+            p.setFont(f)
+            fm = p.fontMetrics()
+            tw, th = fm.horizontalAdvance(txt), fm.height()
+            tx, ty = mid.x() + 10, mid.y() - 10
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255, 225) if light else QColor(0, 0, 0, 190))
+            p.drawRoundedRect(int(tx - 5), int(ty - th), tw + 10, th + 6, 4, 4)
+            p.setPen(QColor(20, 20, 25) if light else QColor(245, 245, 250))
+            p.drawText(QPointF(tx, ty - 3), txt)
+        p.end()
+
+
+class GLViewport(QOpenGLWidget):
+    """QOpenGLWidget hosting a :class:`GLScene`, with pan, zoom-at-cursor, a
+    light/dark background toggle, and a snapping measuring tool.
+
+    Coordinates are kept in logical pixels; the camera only depends on the
+    viewport aspect ratio, so it renders correctly on Retina without explicit
+    devicePixelRatio handling."""
 
     def __init__(self, layout, parent=None):
         super().__init__(parent)
@@ -45,7 +139,22 @@ class GLViewport(QOpenGLWidget):
         self.ctx = None
         self._fitted = False
         self._last = None
+        self.bg = BG_DARK
+        self._light = False
+
+        self.measure_mode = False
+        self.measure_points: list[tuple[float, float]] = []
+        self.measure_cursor = None
+        self.snap: SnapIndex | None = None      # built lazily — keeps startup fast
+        self.snap_px = 12
+
+        self.overlay = MeasureOverlay(self)
+        self.overlay.setGeometry(0, 0, self.width(), self.height())
+        self.overlay.raise_()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def is_light(self) -> bool:
+        return self._light
 
     # -- GL lifecycle -----------------------------------------------------
     def initializeGL(self):
@@ -55,6 +164,7 @@ class GLViewport(QOpenGLWidget):
 
     def resizeGL(self, w, h):
         self.cam.resize(self.width(), self.height())
+        self.overlay.setGeometry(0, 0, self.width(), self.height())
         if not self._fitted and self.scene is not None:
             self.cam.fit(self._layout.bbox())
             self._fitted = True
@@ -62,10 +172,21 @@ class GLViewport(QOpenGLWidget):
     def paintGL(self):
         fbo = self.ctx.detect_framebuffer()
         fbo.use()
-        self.ctx.clear(*BG)
+        self.ctx.clear(*self.bg)
         if self.scene is not None:
             (sx, sy), (ox, oy) = self.cam.scale_offset()
             self.scene.draw(fbo, (sx, sy), (ox, oy))
+
+    def _refresh(self):
+        self.update()
+        self.overlay.update()
+
+    def _snap(self, px, py):
+        if self.snap is None:
+            self.snap = SnapIndex(self._layout)
+        wx, wy = self.cam.screen_to_world(px, py)
+        hit = self.snap.nearest(wx, wy, self.snap_px * self.cam.upp)
+        return hit if hit is not None else (wx, wy)
 
     # -- interaction ------------------------------------------------------
     def wheelEvent(self, e):
@@ -73,43 +194,67 @@ class GLViewport(QOpenGLWidget):
         if steps:
             p = e.position()
             self.cam.zoom_at(p.x(), p.y(), 1.2 ** steps)
-            self.update()
+            self._refresh()
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            p = e.position()
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        p = e.position()
+        if self.measure_mode:
+            pt = self._snap(p.x(), p.y())
+            if len(self.measure_points) != 1:        # 0 or 2 -> start over
+                self.measure_points = [pt]
+                self.measure_cursor = None
+            else:
+                self.measure_points.append(pt)
+            self._refresh()
+        else:
             self._last = (p.x(), p.y())
 
     def mouseMoveEvent(self, e):
+        p = e.position()
+        if self.measure_mode:
+            if len(self.measure_points) == 1:
+                self.measure_cursor = self._snap(p.x(), p.y())
+                self.overlay.update()
+            return
         if self._last is not None:
-            p = e.position()
             self.cam.pan_pixels(p.x() - self._last[0], p.y() - self._last[1])
             self._last = (p.x(), p.y())
-            self.update()
+            self._refresh()
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self._last = None
 
-    # -- API for the layer panel -----------------------------------------
-    def set_layer_visible(self, layer_id: int, visible: bool):
+    # -- API for the panel / shortcuts -----------------------------------
+    def set_measure_mode(self, on: bool):
+        self.measure_mode = bool(on)
+        if on and self.snap is None:          # build the snap index up front, once
+            self.snap = SnapIndex(self._layout)
+        self.setMouseTracking(self.measure_mode)
+        self.setCursor(Qt.CursorShape.CrossCursor if on else Qt.CursorShape.ArrowCursor)
+
+    def clear_measure(self):
+        self.measure_points = []
+        self.measure_cursor = None
+        self.overlay.update()
+
+    def set_fill(self, on: bool):
         if self.scene is not None:
-            self.scene.set_layer_visible(layer_id, visible)
+            self.scene.show_fill = bool(on)
             self.update()
 
-    def set_all_visible(self, visible: bool):
+    def set_background(self, light: bool):
+        self._light = bool(light)
+        self.bg = BG_LIGHT if light else BG_DARK
         if self.scene is not None:
-            self.scene.set_all_visible(visible)
-            self.update()
+            self.scene.set_shade(0.55 if light else 1.0)
+        self._refresh()
 
     def reset_view(self):
         self.cam.fit(self._layout.bbox())
-        self.update()
-
-    def toggle_fill(self):
-        if self.scene is not None:
-            self.scene.toggle_fill()
-            self.update()
+        self._refresh()
 
 
 def _swatch(color: QColor, filled: bool) -> QIcon:
@@ -126,11 +271,11 @@ def _swatch(color: QColor, filled: bool) -> QIcon:
 
 
 class LayerPanel(QWidget):
-    """Right-hand column of clickable layer rows (color swatch + name + count)."""
+    """Right column: clickable layer rows + Measure / Fill / Background controls."""
 
     def __init__(self, layout, viewport: GLViewport, parent=None):
         super().__init__(parent)
-        self._viewport = viewport
+        self._vp = viewport
         cols = layer_colors(max(layout.n_layers, 1))
         self._qcolors = [QColor(int(r * 255), int(g * 255), int(b * 255))
                          for r, g, b in cols]
@@ -155,13 +300,33 @@ class LayerPanel(QWidget):
         self.list.setAlternatingRowColors(True)
         self.list.itemClicked.connect(self._on_click)
         root.addWidget(self.list, 1)
-
-        for s in layout.layer_summary():            # sorted by object count desc
+        for s in layout.layer_summary():
             item = QListWidgetItem(f"{s.name}    {s.n_total:,}")
             item.setData(_LID_ROLE, s.layer_id)
             item.setData(_VIS_ROLE, True)
             self.list.addItem(item)
             self._restyle(item)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        root.addWidget(sep)
+        self.measure_btn = QPushButton("Measure")
+        self.measure_btn.setCheckable(True)
+        self.measure_btn.toggled.connect(viewport.set_measure_mode)
+        self.fill_btn = QPushButton("Fill")
+        self.fill_btn.setCheckable(True)
+        self.fill_btn.setChecked(True)
+        self.fill_btn.toggled.connect(viewport.set_fill)
+        self.bg_btn = QPushButton("Light background")
+        self.bg_btn.setCheckable(True)
+        self.bg_btn.toggled.connect(viewport.set_background)
+        for b in (self.measure_btn, self.fill_btn, self.bg_btn):
+            root.addWidget(b)
+
+        hint = QLabel("Measure: click two points (snaps to the\nnearest vertex). Esc clears.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        root.addWidget(hint)
 
     def _restyle(self, item: QListWidgetItem):
         lid = item.data(_LID_ROLE)
@@ -173,14 +338,17 @@ class LayerPanel(QWidget):
         vis = not bool(item.data(_VIS_ROLE))
         item.setData(_VIS_ROLE, vis)
         self._restyle(item)
-        self._viewport.set_layer_visible(item.data(_LID_ROLE), vis)
+        self._vp.scene.set_layer_visible(item.data(_LID_ROLE), vis)
+        self._vp.update()
 
     def _set_all(self, vis: bool):
         for i in range(self.list.count()):
             item = self.list.item(i)
             item.setData(_VIS_ROLE, vis)
             self._restyle(item)
-        self._viewport.set_all_visible(vis)
+        if self._vp.scene is not None:
+            self._vp.scene.set_all_visible(vis)
+            self._vp.update()
 
 
 class MainWindow(QWidget):
@@ -190,11 +358,11 @@ class MainWindow(QWidget):
         self._layout = layout
 
         self.viewport = GLViewport(layout)
-        panel = LayerPanel(layout, self.viewport)
+        self.panel = LayerPanel(layout, self.viewport)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.viewport)
-        splitter.addWidget(panel)
+        splitter.addWidget(self.panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
         splitter.setSizes([1140, 260])
@@ -205,7 +373,10 @@ class MainWindow(QWidget):
         self.resize(1400, 1000)
 
         QShortcut(QKeySequence("R"), self, self.viewport.reset_view)
-        QShortcut(QKeySequence("F"), self, self.viewport.toggle_fill)
+        QShortcut(QKeySequence("M"), self, self.panel.measure_btn.toggle)
+        QShortcut(QKeySequence("F"), self, self.panel.fill_btn.toggle)
+        QShortcut(QKeySequence("B"), self, self.panel.bg_btn.toggle)
+        QShortcut(QKeySequence("Esc"), self, self.viewport.clear_measure)
 
 
 def run(layout) -> int:

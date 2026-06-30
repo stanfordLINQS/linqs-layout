@@ -128,6 +128,7 @@ class GLScene:
         self.visible = np.ones(self.n_layers, np.float32)
         self.show_fill = True
         self.fill_alpha = float(fill_alpha)
+        self._shade = 1.0          # color multiplier (dimmed in light-background mode)
 
         maxl = str(self.n_layers)
         self.outline_prog = ctx.program(
@@ -248,6 +249,13 @@ class GLScene:
         self.show_fill = not self.show_fill
         return self.show_fill
 
+    def set_shade(self, shade: float) -> None:
+        """Multiply all layer colors by ``shade`` (used to darken for light bg)."""
+        self._shade = float(shade)
+        dimmed = (self.colors * self._shade).astype(np.float32)
+        for prog in (self.outline_prog, self.circ_prog):
+            prog["u_color"].write(dimmed.tobytes())
+
     def _ensure_wind(self, size) -> None:
         if self._wind_size == size:
             return
@@ -289,7 +297,8 @@ class GLScene:
                 main_fbo.use()
                 ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
                 self._wind_tex.use(0)
-                self.cover_prog["u_fill_color"].value = tuple(float(c) for c in self.colors[lid])
+                self.cover_prog["u_fill_color"].value = tuple(
+                    float(c * self._shade) for c in self.colors[lid])
                 self.cover_vao.render(moderngl.TRIANGLES, vertices=3)
 
         # Pass 1b: convex circle fills (plain alpha).
