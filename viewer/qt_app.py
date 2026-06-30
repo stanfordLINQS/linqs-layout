@@ -106,6 +106,11 @@ class GLViewport(QOpenGLWidget):
         self.cam.fit(self._layout.bbox())
         self.update()
 
+    def toggle_fill(self):
+        if self.scene is not None:
+            self.scene.toggle_fill()
+            self.update()
+
 
 def _swatch(color: QColor, filled: bool) -> QIcon:
     pm = QPixmap(14, 14)
@@ -200,6 +205,7 @@ class MainWindow(QWidget):
         self.resize(1400, 1000)
 
         QShortcut(QKeySequence("R"), self, self.viewport.reset_view)
+        QShortcut(QKeySequence("F"), self, self.viewport.toggle_fill)
 
 
 def run(layout) -> int:

@@ -48,6 +48,13 @@ There is no test runner yet; `inspect_dxf.py` on `TOPO06.dxf` is the smoke test.
 Expected: ~290 ms parse, 163,447 polylines, 6,058,058 vertices, 83,190 circles,
 33 layers, extent 14000×12000.
 
+## Workflow
+
+**Commit frequently.** After each self-contained, working increment, make a
+small commit and push — the user strongly prefers many small commits over large
+batched ones. Don't wait until a whole feature is done. Keep each commit
+compiling and, where practical, verified (e.g. an offscreen render still works).
+
 ## Data model (specific to these files — verify before assuming it generalizes)
 
 ASCII DXF R12 (`AC1009`): a strict stream of `(group-code line, value line)` pairs.

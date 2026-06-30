@@ -1,6 +1,9 @@
 # Large reference data (kept locally, too big for GitHub)
 *.dxf
 
+# Cached polygon triangulation sidecars (<file>.trifill.npz)
+*.npz
+
 # Compiled native artifacts
 *.dylib
 *.so

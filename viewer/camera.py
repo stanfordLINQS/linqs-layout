@@ -34,6 +34,11 @@ class Camera2D:
         wy = self.cy - (py - self.vh / 2.0) * self.upp
         return wx, wy
 
+    def world_to_screen(self, wx: float, wy: float) -> tuple[float, float]:
+        px = self.vw / 2.0 + (wx - self.cx) / self.upp
+        py = self.vh / 2.0 - (wy - self.cy) / self.upp
+        return px, py
+
     def zoom_at(self, px: float, py: float, factor: float) -> None:
         """Zoom by ``factor`` (>1 zooms in) keeping the world point under the
         cursor pinned to the same pixel."""
