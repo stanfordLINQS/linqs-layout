@@ -212,22 +212,25 @@ class GLScene:
         self._raw_pos = verts
         self._start, self._count, self._layer = start, count, layer
 
+        # Shared vertex buffers (positions + per-vertex layer). Both the outline
+        # and the fill pass index into these, so the GPU assembles the primitives
+        # and the CPU never expands a per-edge segment buffer or duplicates verts.
+        vert_layer = np.clip(np.repeat(layer, count), 0, self.n_layers - 1).astype(np.float32)
+        self._pos_buf = ctx.buffer(verts.tobytes())
+        self._lay_buf = ctx.buffer(vert_layer.tobytes())
+
+        # Outline edges as GL_LINES element indices: (i, next(i)), wrapping the
+        # last vertex of a closed polyline back to its start.
         nxt = np.arange(1, n + 1, dtype=np.int64)
         last = start + count - 1
-        closed = (flags & 1).astype(bool)
-        nxt[last] = np.where(closed, start, last)
-
-        seg = np.empty((n, 2, 2), np.float32)
-        seg[:, 0, :] = verts
-        seg[:, 1, :] = verts[nxt]
-        seg = seg.reshape(-1, 2)
-
-        vert_layer = np.clip(np.repeat(layer, count), 0, self.n_layers - 1).astype(np.float32)
-        seg_layer = np.repeat(vert_layer, 2)
+        nxt[last] = np.where((flags & 1).astype(bool), start, last)
+        line_idx = np.empty((n, 2), np.uint32)
+        line_idx[:, 0] = np.arange(n, dtype=np.uint32)
+        line_idx[:, 1] = nxt.astype(np.uint32)
         self.line_vao = ctx.vertex_array(
             self.outline_prog,
-            [(ctx.buffer(seg.tobytes()), "2f", "in_pos"),
-             (ctx.buffer(seg_layer.tobytes()), "1f", "in_layer")])
+            [(self._pos_buf, "2f", "in_pos"), (self._lay_buf, "1f", "in_layer")],
+            index_buffer=ctx.buffer(line_idx.reshape(-1).tobytes()), index_element_size=4)
 
     def _build_fill(self, ctx, layout) -> None:
         """Build the layer-sorted triangle-fan index buffer + per-layer ranges."""
@@ -254,7 +257,7 @@ class GLScene:
         self._fill_off = ((np.cumsum(tri_per_layer) - tri_per_layer) * 3).astype(np.int64)
 
         self.fill_vao = ctx.vertex_array(
-            self.wind_prog, [(ctx.buffer(self._raw_pos.tobytes()), "2f", "in_pos")],
+            self.wind_prog, [(self._pos_buf, "2f", "in_pos")],   # shared vertex buffer
             index_buffer=ctx.buffer(idx.tobytes()), index_element_size=4)
 
     def _build_circles(self, ctx, layout) -> None:
