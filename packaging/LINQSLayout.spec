@@ -1,10 +1,13 @@
 # PyInstaller spec for the LINQS Layout macOS app.
 #   pyinstaller --noconfirm --clean packaging/LINQSLayout.spec   (run from repo root)
 import os
+import re
 
 from PyInstaller.utils.hooks import collect_all
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
+with open(os.path.join(ROOT, "viewer", "__init__.py")) as _f:
+    VERSION = re.search(r'__version__\s*=\s*"([^"]+)"', _f.read()).group(1)
 
 # Bundle the native DXF core next to the pydxf package (loader resolves it as a
 # sibling 'dxfcore' dir), plus moderngl's GL-context backend.
@@ -50,8 +53,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "LINQS Layout",
         "CFBundleDisplayName": "LINQS Layout",
-        "CFBundleShortVersionString": "1.0.5",
-        "CFBundleVersion": "1.0.5",
+        "CFBundleShortVersionString": VERSION,
+        "CFBundleVersion": VERSION,
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "12.0",
         "CFBundleDocumentTypes": [

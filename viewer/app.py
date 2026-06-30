@@ -54,7 +54,13 @@ class ViewerApp(QApplication):
             self._main = MainWindow(app=self)
             self._main.show()
             self._main.destroyed.connect(self._forget_main)
+            QTimer.singleShot(1500, self._check_updates_silent)
         return self._main
+
+    def _check_updates_silent(self):
+        if self._main is not None:
+            from .update import check_for_updates
+            check_for_updates(self._main, silent=True)
 
     def _forget_main(self, *_):
         self._main = None
