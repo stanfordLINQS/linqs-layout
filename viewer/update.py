@@ -32,16 +32,21 @@ def _vt(s: str):
 
 
 def _gh() -> str | None:
-    return shutil.which("gh")
+    # A Finder-launched .app doesn't inherit the shell PATH, so also look in the
+    # usual Homebrew locations where gh lives.
+    return (shutil.which("gh")
+            or next((p for p in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh")
+                     if os.path.exists(p)), None))
 
 
 def latest_version() -> str | None:
     """Latest release version (e.g. '1.0.6'), or None if gh is unavailable/fails."""
-    if not _gh():
+    gh = _gh()
+    if not gh:
         return None
     try:
         r = subprocess.run(
-            ["gh", "release", "view", "--repo", REPO, "--json", "tagName", "-q", ".tagName"],
+            [gh, "release", "view", "--repo", REPO, "--json", "tagName", "-q", ".tagName"],
             capture_output=True, text=True, timeout=20)
         return (r.stdout.strip().lstrip("v") or None) if r.returncode == 0 else None
     except Exception:
@@ -50,12 +55,13 @@ def latest_version() -> str | None:
 
 def _download_and_install() -> bool:
     """Download the latest release DMG and install the .app into /Applications."""
-    if not _gh():
+    gh = _gh()
+    if not gh:
         return False
     tmp = tempfile.mkdtemp()
     try:
         r = subprocess.run(
-            ["gh", "release", "download", "--repo", REPO, "--pattern", "*.dmg",
+            [gh, "release", "download", "--repo", REPO, "--pattern", "*.dmg",
              "--dir", tmp, "--clobber"],
             capture_output=True, text=True, timeout=600)
         if r.returncode != 0:
