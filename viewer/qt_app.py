@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QMainWindow,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
+from . import style
 from .camera import Camera2D
 from .offscreen import BG_DARK, BG_LIGHT
 from .palette import layer_colors
@@ -40,6 +41,12 @@ def _format_dist(v: float) -> str:
     return f"{v / 1000.0:g} mm" if v >= 1000.0 else f"{v:g} µm"
 
 
+def _mono(size: int, bold: bool = False) -> QFont:
+    f = QFont(style.MONO_FAMILY, size)
+    f.setBold(bold)
+    return f
+
+
 class MeasureOverlay(QWidget):
     """Transparent HUD over the GL viewport: markers, the measured segment, and
     the distance readout. Mouse-transparent so the viewport still gets clicks."""
@@ -51,8 +58,8 @@ class MeasureOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-    def _draw_scale_bar(self, p, light):
-        """Bottom-left scale bar: one grid cell, labeled in µm/mm."""
+    def _draw_scale_bar(self, p):
+        """Bottom-left scale bar: one grid cell, labeled in µm/mm (amber, mono)."""
         vp = self._vp
         scene = vp.scene
         if scene is None or vp.cam.upp <= 0:
@@ -61,34 +68,24 @@ class MeasureOverlay(QWidget):
         if g <= 0:
             return
         length = g / vp.cam.upp                       # one grid cell, in logical px
-        x0, y0 = 18.0, self.height() - 22.0
-        label = _format_dist(g)
-
-        f = QFont()
-        f.setPointSize(10)
-        f.setBold(True)
-        p.setFont(f)
-        lw = p.fontMetrics().horizontalAdvance(label)
-
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 180) if light else QColor(0, 0, 0, 140))
-        p.drawRoundedRect(int(x0 - 8), int(y0 - 28), int(max(length, lw) + 18), 40, 5, 5)
-
-        col = QColor(35, 38, 46) if light else QColor(228, 231, 238)
-        p.setPen(QPen(col, 2.0))
+        x0, y0 = 18.0, self.height() - 18.0
+        amber = style.qcolor(style.ACCENT)
+        p.setPen(QPen(amber, 1.5))
         p.drawLine(QPointF(x0, y0), QPointF(x0 + length, y0))
-        p.drawLine(QPointF(x0, y0 - 5), QPointF(x0, y0 + 5))
-        p.drawLine(QPointF(x0 + length, y0 - 5), QPointF(x0 + length, y0 + 5))
-        p.drawText(QPointF(x0, y0 - 9), label)
+        p.drawLine(QPointF(x0, y0 - 4), QPointF(x0, y0 + 4))
+        p.drawLine(QPointF(x0 + length, y0 - 4), QPointF(x0 + length, y0 + 4))
+        p.setFont(_mono(10, True))
+        p.setPen(amber)
+        p.drawText(QPointF(x0, y0 - 8), _format_dist(g))
 
     def paintEvent(self, _e):
         vp = self._vp
         cam = vp.cam
-        light = vp.is_light()
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        amber = style.qcolor(style.ACCENT)
 
-        self._draw_scale_bar(p, light)
+        self._draw_scale_bar(p)
 
         chain = list(vp.measure_points)
         if len(chain) == 1 and vp.measure_cursor is not None:
@@ -99,9 +96,6 @@ class MeasureOverlay(QWidget):
             p.end()
             return
 
-        accent = QColor(230, 120, 0) if light else QColor(255, 150, 30)
-        snapcol = QColor(0, 150, 210) if light else QColor(60, 215, 255)
-
         def to_s(pt):
             sx, sy = cam.world_to_screen(pt[0], pt[1])
             return QPointF(sx, sy)
@@ -109,47 +103,44 @@ class MeasureOverlay(QWidget):
         # Live snap indicator under the cursor (square = corner, circle = edge).
         if show_snap:
             s = to_s(vp.measure_cursor)
-            p.setPen(QPen(snapcol, 1.6))
+            p.setPen(QPen(amber, 1.6))
             p.setBrush(Qt.BrushStyle.NoBrush)
             if vp.snap_kind == "corner":
                 p.drawRect(int(s.x() - 6), int(s.y() - 6), 12, 12)
-                p.setBrush(snapcol)
+                p.setBrush(amber)
                 p.drawEllipse(s, 1.6, 1.6)
             else:
                 p.drawEllipse(s, 6, 6)
 
         if len(chain) == 2:
-            pen = QPen(accent, 1.6)
+            pen = QPen(amber, 1.4)
             pen.setStyle(Qt.PenStyle.DashLine)
             p.setPen(pen)
             p.drawLine(to_s(chain[0]), to_s(chain[1]))
 
-        p.setPen(QPen(accent, 1.6))
+        p.setPen(QPen(amber, 1.6))
         p.setBrush(Qt.BrushStyle.NoBrush)
         for pt in chain:
             s = to_s(pt)
             p.drawLine(QPointF(s.x() - 6, s.y()), QPointF(s.x() + 6, s.y()))
             p.drawLine(QPointF(s.x(), s.y() - 6), QPointF(s.x(), s.y() + 6))
-            p.drawEllipse(s, 4, 4)
 
         if len(chain) == 2:
             (x0, y0), (x1, y1) = chain
             dx, dy = x1 - x0, y1 - y0
             dist = (dx * dx + dy * dy) ** 0.5
-            txt = f"{dist:,.2f}   (Δx {dx:,.2f}, Δy {dy:,.2f})"
+            # Measurements in µm at 1 nm resolution (3 decimals).
+            txt = f"{dist:,.3f} µm   Δx {dx:,.3f}  Δy {dy:,.3f}"
             mid = to_s(((x0 + x1) / 2, (y0 + y1) / 2))
-            f = QFont()
-            f.setPointSize(11)
-            f.setBold(True)
-            p.setFont(f)
+            p.setFont(_mono(11, True))
             fm = p.fontMetrics()
             tw, th = fm.horizontalAdvance(txt), fm.height()
             tx, ty = mid.x() + 10, mid.y() - 10
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(255, 255, 255, 225) if light else QColor(0, 0, 0, 190))
-            p.drawRoundedRect(int(tx - 5), int(ty - th), tw + 10, th + 6, 4, 4)
-            p.setPen(QColor(20, 20, 25) if light else QColor(245, 245, 250))
-            p.drawText(QPointF(tx, ty - 3), txt)
+            p.setPen(QPen(amber, 1.0))
+            p.setBrush(style.qcolor(style.CANVAS, 225))      # flat box, 1px amber border
+            p.drawRect(int(tx - 6), int(ty - th), tw + 12, th + 6)
+            p.setPen(amber)
+            p.drawText(QPointF(tx, ty - 4), txt)
         p.end()
 
 
@@ -179,13 +170,25 @@ class GLViewport(QOpenGLWidget):
         self.snap: Snapper | None = None        # built lazily — keeps startup fast
         self.snap_px = 12
 
+        self.status_sink = None                 # callable(str): bottom status strip
+
         self.overlay = MeasureOverlay(self)
         self.overlay.setGeometry(0, 0, self.width(), self.height())
         self.overlay.raise_()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)              # live cursor coords for the status
 
     def is_light(self) -> bool:
         return self._light
+
+    def _emit_status(self, px, py):
+        if self.status_sink is None:
+            return
+        wx, wy = self.cam.screen_to_world(px, py)
+        g = nice_grid_spacing(self.cam.upp)
+        self.status_sink("   ·   ".join([
+            f"x {wx:,.1f}  y {wy:,.1f}", _format_dist(g),
+            f"{self._layout.n_layers} layers", os.path.basename(self._layout.path)]))
 
     # -- GL lifecycle -----------------------------------------------------
     def initializeGL(self):
@@ -241,6 +244,7 @@ class GLViewport(QOpenGLWidget):
         if steps:
             p = e.position()
             self.cam.zoom_at(p.x(), p.y(), 1.2 ** steps)
+            self._emit_status(p.x(), p.y())
             self._refresh()
 
     def mousePressEvent(self, e):
@@ -261,6 +265,7 @@ class GLViewport(QOpenGLWidget):
 
     def mouseMoveEvent(self, e):
         p = e.position()
+        self._emit_status(p.x(), p.y())
         if self.measure_mode:
             # Live snap / ortho-constraint indicator under the cursor.
             shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
@@ -333,66 +338,78 @@ class LayerPanel(QWidget):
 
     def __init__(self, layout, viewport: GLViewport, parent=None):
         super().__init__(parent)
+        self.setObjectName("panel")
         self._vp = viewport
         cols = layer_colors(max(layout.n_layers, 1))
         self._qcolors = [QColor(int(r * 255), int(g * 255), int(b * 255))
                          for r, g, b in cols]
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6)
-        root.setSpacing(4)
-        header = QLabel("Layers")
-        header.setStyleSheet("font-weight: 600;")
-        root.addWidget(header)
+        root.setContentsMargins(14, 12, 12, 10)
+        root.setSpacing(9)
 
-        btns = QHBoxLayout()
-        show_all = QPushButton("Show all")
-        hide_all = QPushButton("Hide all")
-        show_all.clicked.connect(lambda: self._set_all(True))
-        hide_all.clicked.connect(lambda: self._set_all(False))
-        btns.addWidget(show_all)
-        btns.addWidget(hide_all)
-        root.addLayout(btns)
+        head = QHBoxLayout()
+        title = QLabel("LAYERS")
+        hf = QFont(style.MONO_FAMILY, 12)
+        hf.setBold(True)
+        hf.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 3)
+        title.setFont(hf)
+        count = QLabel(str(layout.n_layers))
+        count.setStyleSheet("color: rgb(%d,%d,%d);" % style.MUTED)
+        head.addWidget(title)
+        head.addStretch(1)
+        head.addWidget(count)
+        root.addLayout(head)
+        root.addWidget(self._rule())
 
         self.list = QListWidget()
-        self.list.setAlternatingRowColors(True)
         self.list.itemClicked.connect(self._on_click)
         root.addWidget(self.list, 1)
         for s in layout.layer_summary():
-            item = QListWidgetItem(f"{s.name}    {s.n_total:,}")
+            item = QListWidgetItem(f"{s.name.upper()}   {s.n_total:,}")
             item.setData(_LID_ROLE, s.layer_id)
             item.setData(_VIS_ROLE, True)
             self.list.addItem(item)
             self._restyle(item)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        root.addWidget(sep)
-        # Checkboxes (not checkable push buttons): on macOS a checkable button
-        # gives no visible checked state, so a default-on toggle looks off.
-        self.measure_btn = QCheckBox("Measure")
-        self.measure_btn.toggled.connect(viewport.set_measure_mode)
-        self.fill_btn = QCheckBox("Fill")
-        self.fill_btn.setChecked(True)            # fill is on by default
+        allnone = QHBoxLayout()
+        allnone.setSpacing(4)
+        b_all = QPushButton("all")
+        b_none = QPushButton("none")
+        b_all.clicked.connect(lambda: self._set_all(True))
+        b_none.clicked.connect(lambda: self._set_all(False))
+        slash = QLabel("/")
+        slash.setStyleSheet("color: rgb(%d,%d,%d);" % style.DIM)
+        for w in (b_all, slash, b_none):
+            allnone.addWidget(w)
+        allnone.addStretch(1)
+        root.addLayout(allnone)
+        root.addWidget(self._rule())
+
+        self.fill_btn = QCheckBox("fill")
+        self.fill_btn.setChecked(True)            # fill on by default
         self.fill_btn.toggled.connect(viewport.set_fill)
-        self.grid_btn = QCheckBox("Grid")
-        self.grid_btn.setChecked(True)            # grid is on by default
+        self.grid_btn = QCheckBox("grid")
+        self.grid_btn.setChecked(True)            # grid on by default
         self.grid_btn.toggled.connect(viewport.set_grid)
-        self.bg_btn = QCheckBox("Light background")
+        self.measure_btn = QCheckBox("measure")
+        self.measure_btn.toggled.connect(viewport.set_measure_mode)
+        self.bg_btn = QCheckBox("light")
         self.bg_btn.toggled.connect(viewport.set_background)
-        for b in (self.measure_btn, self.fill_btn, self.grid_btn, self.bg_btn):
+        for b in (self.fill_btn, self.grid_btn, self.measure_btn, self.bg_btn):
             root.addWidget(b)
 
-        hint = QLabel("Measure: click two points (snaps to the\nnearest vertex). Esc clears.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #888; font-size: 11px;")
-        root.addWidget(hint)
+    def _rule(self) -> QFrame:
+        f = QFrame()
+        f.setFixedHeight(1)
+        f.setStyleSheet("background: rgb(%d,%d,%d); border: none;" % style.HAIR)
+        return f
 
     def _restyle(self, item: QListWidgetItem):
         lid = item.data(_LID_ROLE)
         vis = bool(item.data(_VIS_ROLE))
         item.setIcon(_swatch(self._qcolors[lid], vis))
-        item.setForeground(QColor(235, 235, 235) if vis else QColor(120, 120, 120))
+        item.setForeground(style.qcolor(style.INK) if vis else style.qcolor(style.DIM))
 
     def _on_click(self, item: QListWidgetItem):
         vis = not bool(item.data(_VIS_ROLE))
@@ -429,9 +446,20 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
-        splitter.setSizes([1140, 260])
+        splitter.setSizes([1160, 240])
+        splitter.setHandleWidth(1)
         self.setCentralWidget(splitter)
         self.resize(1400, 1000)
+
+        # Bottom status strip: live cursor x/y · scale · layer count · filename.
+        self._status = QLabel()
+        self._status.setContentsMargins(14, 0, 14, 0)
+        sb = self.statusBar()
+        sb.setSizeGripEnabled(False)
+        sb.addWidget(self._status, 1)
+        self.viewport.status_sink = self._status.setText
+        self._status.setText(
+            f"{layout.n_layers} layers   ·   {os.path.basename(layout.path)}")
 
         self._build_menu()
         QShortcut(QKeySequence("Esc"), self, self.viewport.clear_measure)

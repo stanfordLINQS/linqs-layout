@@ -13,11 +13,12 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtCore import QEvent, QTimer
-from PySide6.QtGui import QSurfaceFormat
+from PySide6.QtGui import QFont, QSurfaceFormat
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from pydxf import DxfLayout
 
+from . import style
 from .qt_app import MainWindow, WelcomeWindow
 
 
@@ -36,6 +37,8 @@ class ViewerApp(QApplication):
         self.setApplicationName("LINQS Layout")
         self.setApplicationDisplayName("LINQS Layout")
         self.setOrganizationName("Stanford LINQS")
+        self.setFont(QFont(style.MONO_FAMILY, 12))
+        self.setStyleSheet(style.stylesheet())
         self._windows: list[MainWindow] = []
         self._welcome = None
 

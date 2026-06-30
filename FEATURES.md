@@ -30,6 +30,11 @@ Status of `linqs-layout` capabilities. ✅ done · 🚧 in progress · ⬜ plann
   geometry; spacing snaps to nice 1/2/5 values as you zoom.
 - ✅ **Scale bar** — bottom-left, one grid cell long, labeled in µm/mm; tracks the
   grid spacing through zoom.
+- ✅ **Status bar** — bottom strip with live cursor x/y, scale, layer count, and
+  filename.
+- ✅ **Brutalist UI** — one monospace face, hairline rules, monochrome chrome, and
+  a single amber accent (tokens + QSS in `viewer/style.py`); the layout geometry is
+  the only saturated color. Measurements read to 1 nm (3-decimal µm).
 - ✅ **Light / dark background** (`B`) — toggles background; layer colors dim on
   light for contrast.
 - ✅ **Headless render** — `view_dxf.py --png` / `viewer/offscreen.py` render to a
@@ -57,6 +62,9 @@ Status of `linqs-layout` capabilities. ✅ done · 🚧 in progress · ⬜ plann
 
 ## Planned
 
+- ⬜ **Tabs** — opening more than one file opens each in its own tab within a
+  single window (instead of a separate window per file), so multiple layouts are
+  open at once and you can switch between them.
 - ⬜ **Instant startup** — cache parsed geometry to a binary sidecar so launches
   skip re-parsing the 220 MB DXF.
 - ⬜ **DRC** — per-layer `shapely.STRtree` spatial index → width / spacing /

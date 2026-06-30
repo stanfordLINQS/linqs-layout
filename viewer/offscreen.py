@@ -13,7 +13,9 @@ from .scene import GLScene
 
 # Background presets. Dark makes the bright per-layer outlines pop; light mode
 # pairs with dimmed colors (see GLScene.set_shade) for print-friendly views.
-BG_DARK = (0.06, 0.06, 0.08)
+from .style import CANVAS_GL
+
+BG_DARK = CANVAS_GL                  # matches the app's brutalist canvas (#0a0a0c)
 BG_LIGHT = (0.92, 0.92, 0.94)
 BG = BG_DARK
 
