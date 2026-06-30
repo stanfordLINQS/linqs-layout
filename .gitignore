@@ -1,0 +1,15 @@
+# Large reference data (kept locally, too big for GitHub)
+*.dxf
+
+# Compiled native artifacts
+*.dylib
+*.so
+*.o
+*.a
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
