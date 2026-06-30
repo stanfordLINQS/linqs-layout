@@ -187,7 +187,10 @@ class GLViewport(QOpenGLWidget):
         if self.status_sink is None:
             return
         wx, wy = self.cam.screen_to_world(px, py)
-        self.status_sink(f"x {wx:,.1f}   y {wy:,.1f}   ·   {self._layout.n_layers} layers")
+        a = "#%02x%02x%02x" % style.ACCENT
+        self.status_sink(
+            f'<span style="color:{a}">x</span> {wx:,.1f}'
+            f'&nbsp;&nbsp;&nbsp;<span style="color:{a}">y</span> {wy:,.1f}')
 
     # -- GL lifecycle -----------------------------------------------------
     def initializeGL(self):
@@ -520,7 +523,7 @@ class MainWindow(QMainWindow):
             return
         name = os.path.basename(view.layout_obj.path)
         self.setWindowTitle(f"LINQS Layout — {name}")
-        self._status.setText(f"{view.layout_obj.n_layers} layers")
+        self._status.clear()
         self._status_file.setText(name)
 
     def _close_tab(self, idx):
