@@ -8,10 +8,7 @@ ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 
 # Bundle the native DXF core next to the pydxf package (loader resolves it as a
 # sibling 'dxfcore' dir), plus moderngl's GL-context backend.
-datas = [
-    (os.path.join(ROOT, "dxfcore", "libdxfcore.dylib"), "dxfcore"),
-    (os.path.join(SPECPATH, "icon.png"), "."),     # shown on the welcome screen
-]
+datas = [(os.path.join(ROOT, "dxfcore", "libdxfcore.dylib"), "dxfcore")]
 binaries = []
 hiddenimports = ["glcontext", "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets"]
 for pkg in ("moderngl", "glcontext"):
