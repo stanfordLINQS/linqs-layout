@@ -22,6 +22,12 @@ latency is not acceptable, even if it's simpler or adds capability.
   and replaced with a single-core GPU winding-number fill).
 - Prefer GPU / vectorized / SoA approaches; never add per-entity Python loops in a
   hot path. Resolve per-layer state in shaders (uniform writes), not buffer rebuilds.
+- **Never cache. Nothing, ever.** No precompute/sidecar caches, no on-disk
+  memoization, no "skip work if we did it last time." Everything is computed fresh
+  and fast on **every** run — speed must come from genuinely fast code (the C++
+  parse, the GPU, vectorized numpy), not from remembering past work. The user has
+  explicitly rejected caching (parse cache, triangulation cache). If something is
+  only fast *with* a cache, it isn't fast enough — make the real path faster.
 - **Measure before and after** any hot-path change (offscreen render timing, fps,
   parse ms). If something costs speed, find another way — don't ship the regression.
 

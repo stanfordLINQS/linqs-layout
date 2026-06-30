@@ -66,8 +66,6 @@ Status of `linqs-layout` capabilities. ✅ done · 🚧 in progress · ⬜ plann
 
 ## Planned
 
-- ⬜ **Instant startup** — cache parsed geometry to a binary sidecar so launches
-  skip re-parsing the 220 MB DXF.
 - ⬜ **DRC** — per-layer `shapely.STRtree` spatial index → width / spacing /
   enclosure / min-area rules → violation reporting.
 - ⬜ **Measurement options** — edge/midpoint snapping; persistent multi-segment
