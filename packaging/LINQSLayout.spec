@@ -50,8 +50,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "LINQS Layout",
         "CFBundleDisplayName": "LINQS Layout",
-        "CFBundleShortVersionString": "1.0.2",
-        "CFBundleVersion": "1.0.2",
+        "CFBundleShortVersionString": "1.0.3",
+        "CFBundleVersion": "1.0.3",
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "12.0",
         "CFBundleDocumentTypes": [
