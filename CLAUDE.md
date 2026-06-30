@@ -103,6 +103,39 @@ Structure-of-Arrays exposed by `DxfLayout`:
 - Keep the design SoA + vectorized; avoid introducing per-entity Python objects in
   hot paths.
 
+## Packaging & release (macOS app)
+
+The viewer ships as a standalone `.app` (`app_main.py` → `viewer/app.py`, which
+handles File▸Open, macOS "Open With" via `QFileOpenEvent`, drag-drop, and
+multi-window). Everything lives in `packaging/`:
+
+```bash
+FRESH_VENV=1 bash packaging/build_app.sh   # -> dist/LINQS Layout.app
+bash packaging/make_dmg.sh                  # -> dist/LINQS-Layout.dmg
+```
+
+- **Always build with `FRESH_VENV=1`.** The pyenv 3.13.1 env has the obsolete
+  `pathlib` **backport** installed, which makes PyInstaller abort. The fresh venv
+  also keeps the bundle small. (Permanent fix: `pip uninstall pathlib` in pyenv.)
+- The spec (`packaging/LINQSLayout.spec`) collects `libdxfcore.dylib` into a
+  `dxfcore/` dir beside the frozen modules; `pydxf/loader.py` resolves it via
+  `sys._MEIPASS` when `sys.frozen`. Info.plist registers `.dxf` documents + icon.
+- **Code signing on iCloud-synced folders (this repo is in iCloud Documents):**
+  files get `com.apple.FinderInfo` / `com.apple.fileprovider.*` xattrs, and
+  `codesign` rejects them with *"resource fork, Finder information, or similar
+  detritus not allowed"*. `xattr -cr` can't fix it — the protected
+  `com.apple.provenance` attr makes it bail. Workaround (build/dmg scripts do it):
+  `ditto --noextattr --norsrc` a copy to `/tmp`, sign there, move back. The
+  `dist/` copy re-acquires `FinderInfo` on iCloud (so `codesign --verify --strict`
+  on it fails — harmless, it still runs); `make_dmg.sh` re-strips via `ditto`, so
+  **the app *inside the DMG* is the clean, strict-valid artifact** — verify that
+  one (mount the dmg), not the `dist/` copy.
+- App is **ad-hoc signed** (`codesign -s -`) — required to launch on Apple
+  Silicon, but unsigned/unnotarized, so Gatekeeper needs right-click → Open.
+- **Branches:** `main` = dev (keeps CLAUDE.md, FEATURES.md, `view_topo06.py`,
+  `docs/`). **`production`** = release: minimal chip-agnostic README, dev/chip
+  files removed. Cut releases on `production` with the DMG via `gh release create`.
+
 ## Next steps toward DRC
 
 Per-layer `shapely.STRtree` spatial index → width / spacing / enclosure / min-area
