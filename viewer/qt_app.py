@@ -224,15 +224,16 @@ class GLViewport(QOpenGLWidget):
         return (pt if pt is not None else (wx, wy)), kind
 
     def _measure_point(self, px, py, shift):
-        """Point for the measuring tool. With Shift held while placing the second
-        point, constrain it to horizontal or vertical from the first point."""
+        """Point for the measuring tool. Snapping (corner/edge) always applies;
+        with Shift held while placing the second point, the snapped point is then
+        constrained to horizontal or vertical from the first point. The snap kind
+        is preserved, so the snap indicator still shows on the constrained point."""
+        pt, kind = self._snap(px, py)
         if shift and len(self.measure_points) == 1:
-            wx, wy = self.cam.screen_to_world(px, py)
             x0, y0 = self.measure_points[0]
-            if abs(wx - x0) >= abs(wy - y0):
-                return (wx, y0), "ortho"          # horizontal lock
-            return (x0, wy), "ortho"              # vertical lock
-        return self._snap(px, py)
+            sx, sy = pt
+            pt = (sx, y0) if abs(sx - x0) >= abs(sy - y0) else (x0, sy)
+        return pt, kind
 
     # -- interaction ------------------------------------------------------
     def wheelEvent(self, e):
@@ -467,6 +468,47 @@ class MainWindow(QMainWindow):
     def dragEnterEvent(self, e):
         urls = e.mimeData().urls() if e.mimeData().hasUrls() else []
         if self._app is not None and any(u.toLocalFile().lower().endswith(".dxf") for u in urls):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        for u in e.mimeData().urls():
+            p = u.toLocalFile()
+            if p.lower().endswith(".dxf"):
+                self._app.open_path(p)
+                break
+
+
+class WelcomeWindow(QMainWindow):
+    """Default startup screen: prompts to open a DXF (⌘O), via dialog or drop."""
+
+    def __init__(self, app):
+        super().__init__()
+        self._app = app
+        self.setWindowTitle("LINQS Layout")
+        self.setAcceptDrops(True)
+        self.resize(700, 480)
+
+        central = QWidget()
+        central.setStyleSheet("background-color: black;")
+        v = QVBoxLayout(central)
+        v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        hint = QLabel("Press  ⌘O  to open a DXF file")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setStyleSheet("color: white; font-size: 20px;")
+        v.addWidget(hint)
+
+        self.setCentralWidget(central)
+
+        file_menu = self.menuBar().addMenu("File")
+        act_open = QAction("Open…", self)
+        act_open.setShortcut(QKeySequence.StandardKey.Open)
+        act_open.triggered.connect(lambda: self._app.prompt_open())
+        file_menu.addAction(act_open)
+
+    def dragEnterEvent(self, e):
+        urls = e.mimeData().urls() if e.mimeData().hasUrls() else []
+        if any(u.toLocalFile().lower().endswith(".dxf") for u in urls):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
