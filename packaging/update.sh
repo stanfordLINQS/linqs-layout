@@ -27,7 +27,7 @@ DMG="$(ls "$TMP"/*.dmg | head -1)"
 echo "==> mounting $(basename "$DMG")…"
 MNT="$(hdiutil attach "$DMG" -nobrowse -noverify -readonly | grep /Volumes | awk -F'\t' '{print $NF}')"
 
-echo "==> installing to $APP…"
+echo "==> installing to ${APP}"
 rm -rf "$APP"
 ditto "$MNT/LINQS Layout.app" "$APP"
 hdiutil detach "$MNT" >/dev/null
