@@ -17,7 +17,7 @@ with open(os.path.join(ROOT, "viewer", "__init__.py")) as _f:
 datas = [(os.path.join(ROOT, "dxfcore", "dxfcore.dll"), "dxfcore")]
 binaries = []
 hiddenimports = ["glcontext", "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets"]
-for pkg in ("moderngl", "glcontext"):
+for pkg in ("moderngl", "glcontext", "mapbox_earcut"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
@@ -32,7 +32,7 @@ a = Analysis(
     excludes=[
         "PyQt6", "PyQt5", "PySide2", "shiboken2",   # avoid clashing Qt bindings
         "matplotlib", "tkinter", "scipy", "pandas", "IPython",
-        "pytest", "mapbox_earcut",
+        "pytest",
     ],
     noarchive=False,
 )

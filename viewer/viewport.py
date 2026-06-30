@@ -7,7 +7,7 @@ devicePixelRatio handling."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from . import style
@@ -16,6 +16,39 @@ from .offscreen import BG_DARK, BG_LIGHT
 from .overlay import MeasureOverlay
 from .scene import GLScene, nice_grid_spacing
 from .snap import Snapper
+
+# A real (non-overlapping) triangulation cuts the wind pass's fragment count
+# for polygons whose naive fan would otherwise self-overlap heavily, but
+# earcut's cost scales with polygon complexity, not just vertex count, and a
+# handful of large/concave polygons (e.g. a routing mesh) can take several
+# seconds on a real file. Computing it synchronously would turn a
+# several-second freeze into "loading the file", which is exactly what this
+# app is trying not to be -- so it runs on a background thread (pure
+# numpy/earcut, no GL calls) and gets installed in-place once ready, while
+# the always-correct fan + winding-rule path keeps rendering in the meantime.
+#
+# The result (numpy arrays) is stashed as a plain attribute and `done` is
+# emitted with no payload, rather than emitting the arrays themselves through
+# the signal -- passing numpy arrays as a queued cross-thread signal argument
+# reproducibly segfaulted here (confirmed via bisection: identical
+# computation + identical GL install call both work fine called synchronously
+# on the main thread; only routing the *data* through the signal/slot queue
+# crashed). Reading self.result as a plain attribute from the main-thread
+# slot, with the signal used only as a parameterless "go check" notification,
+# avoids whatever Qt/PySide was doing with the marshaled payload.
+class _TriangulateThread(QThread):
+    done = Signal()
+
+    def __init__(self, verts, start, count, layer, n_layers, parent=None):
+        super().__init__(parent)
+        self._verts, self._start, self._count = verts, start, count
+        self._layer, self._n_layers = layer, n_layers
+        self.result = None
+
+    def run(self):
+        from .triangulate import compute_real_fill
+        self.result = compute_real_fill(self._verts, self._start, self._count, self._layer, self._n_layers)
+        self.done.emit()
 
 # Snapping (Snapper.snap) is a full-geometry numpy scan -- a few ms on large
 # layouts. Recomputing it synchronously on every raw mouse-move event (no
@@ -78,6 +111,34 @@ class GLViewport(QOpenGLWidget):
         import moderngl
         self.ctx = moderngl.create_context()
         self.scene = GLScene(self.ctx, self._layout)
+        self._start_triangulation()
+
+    def _start_triangulation(self):
+        import numpy as np
+
+        verts = np.ascontiguousarray(self._layout.verts, np.float32)
+        start = np.asarray(self._layout.poly_start, np.int64)
+        count = np.asarray(self._layout.poly_count, np.int64)
+        layer = np.asarray(self._layout.poly_layer, np.int64)
+        self._tri_thread = _TriangulateThread(verts, start, count, layer, self.scene.n_layers, self)
+        self._tri_thread.done.connect(self._on_triangulation_ready)
+        self._tri_thread.start()
+
+    def _on_triangulation_ready(self):
+        if self.scene is None:              # viewport could have closed meanwhile
+            return
+        # install_triangulated_fill makes GL calls (ctx.buffer/vertex_array),
+        # but this slot runs via the Qt event loop in response to a plain
+        # signal, not from inside paintGL -- Qt only makes this widget's GL
+        # context current automatically for the paint callback itself, so it
+        # must be made current explicitly here first. Without this, the GL
+        # calls below execute against whatever context (if any) happened to
+        # be current, which reproducibly crashed (access violation).
+        self.makeCurrent()
+        idx, fill_off, fill_count = self._tri_thread.result
+        self.scene.install_triangulated_fill(idx, fill_off, fill_count)
+        self.doneCurrent()
+        self.update()
 
     def resizeGL(self, w, h):
         self.cam.resize(self.width(), self.height())
