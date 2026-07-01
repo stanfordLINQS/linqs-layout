@@ -65,6 +65,12 @@ def main() -> int:
             if arg.lower().endswith(".dxf"):
                 app.open_path(arg)
 
+        # open_path parses on a background thread now; wait for the tab to appear.
+        _end = time.monotonic() + 15.0
+        while time.monotonic() < _end and (app._main is None or app._main._cur() is None):
+            QApplication.processEvents()
+            time.sleep(0.01)
+
         win = app._main
         vp = win._cur().viewport
         vp.set_measure_mode(True)

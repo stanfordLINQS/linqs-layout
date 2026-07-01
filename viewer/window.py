@@ -7,8 +7,9 @@ import os
 
 from PySide6.QtCore import QFileSystemWatcher, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QMainWindow,
-                               QSplitter, QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel,
+                               QMainWindow, QProgressBar, QSplitter, QTabWidget,
+                               QVBoxLayout, QWidget)
 
 from pydxf import DxfLayout
 
@@ -36,6 +37,46 @@ class _ParseThread(QThread):
         except Exception:                 # noqa: BLE001 - partial/locked file -> keep current
             layout = None
         self.done.emit(layout)
+
+
+class LoadingWindow(QWidget):
+    """Small centered card shown while a DXF is parsed on a background thread
+    (large files / slow network drives), so the app gives immediate feedback
+    instead of a frozen dock icon while the file loads."""
+
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("loading")
+        self.setFixedWidth(400)
+        self.setStyleSheet(
+            "QWidget#loading { background: rgb(%d,%d,%d); border: 1px solid rgb(%d,%d,%d); }"
+            % (style.CANVAS + style.HAIR))
+        v = QVBoxLayout(self)
+        v.setContentsMargins(28, 24, 28, 24)
+        v.setSpacing(16)
+        self._label = QLabel("Opening…")
+        self._label.setFont(_mono(13))
+        self._label.setStyleSheet("color: rgb(%d,%d,%d); border: none;" % style.INK)
+        bar = QProgressBar()
+        bar.setRange(0, 0)                      # indeterminate: a busy indicator
+        bar.setTextVisible(False)
+        bar.setFixedHeight(6)
+        bar.setStyleSheet(
+            "QProgressBar { background: rgb(%d,%d,%d); border: none; }"
+            "QProgressBar::chunk { background: rgb(%d,%d,%d); }" % (style.HAIR + style.ACCENT))
+        v.addWidget(self._label)
+        v.addWidget(bar)
+
+    def set_name(self, name: str):
+        self._label.setText(f"Opening  {name} …")
+
+    def center(self):
+        scr = self.screen() or QApplication.primaryScreen()
+        if scr is not None:
+            g = scr.availableGeometry()
+            self.adjustSize()
+            self.move(g.center().x() - self.width() // 2,
+                      g.center().y() - self.height() // 2)
 
 
 class LayoutView(QWidget):

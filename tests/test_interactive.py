@@ -57,11 +57,21 @@ def main() -> int:
 
     from viewer.app import ViewerApp, _configure_format
 
+    def pump_until(cond, timeout=15.0):
+        """Spin the event loop until ``cond()`` or timeout. open_path parses on a
+        background thread now, so a tab appears a few event-loop turns later."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end and not cond():
+            QApplication.processEvents()
+            time.sleep(0.01)
+        return cond()
+
     _configure_format()
     app = ViewerApp([sys.argv[0], SAMPLE])
     for arg in app.arguments()[1:]:
         if arg.lower().endswith(".dxf"):
             app.open_path(arg)
+    pump_until(lambda: app._main is not None and app._main.tabs.count() >= 1)
 
     out_dir = tempfile.mkdtemp(prefix="linqs-t5-")
     state = {"ok": True, "n": 0}
@@ -222,7 +232,7 @@ def main() -> int:
             print("[opening a second file adds a tab]")
             tabs_before = win.tabs.count()
             app.open_path(SAMPLE)
-            QApplication.processEvents()
+            pump_until(lambda: win.tabs.count() == tabs_before + 1)
             ok("second tab added", win.tabs.count() == tabs_before + 1)
             shot("two_tabs")
 

@@ -16,6 +16,7 @@ its own window if none does.
 
 from __future__ import annotations
 
+import os
 import sys
 
 from PySide6.QtCore import QEvent, QSharedMemory, QTimer
@@ -23,10 +24,8 @@ from PySide6.QtGui import QFont, QSurfaceFormat
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
-from pydxf import DxfLayout
-
 from . import style
-from .window import MainWindow, WelcomeWindow
+from .window import LoadingWindow, MainWindow, WelcomeWindow, _ParseThread
 
 # Per-user names for single-instance coordination (relaying file opens to an
 # already-running process instead of spawning a second window). Suffixed so
@@ -67,6 +66,10 @@ class ViewerApp(QApplication):
         self._ipc_server = None
         self._ipc_conns = []                    # keep incoming sockets alive until handled
         self._ipc_lock = None                   # QSharedMemory; held for our lifetime iff primary
+        self._open_queue = []                   # paths waiting to be parsed
+        self._open_thread = None                # current background parse thread
+        self._opening = False                   # a parse is in flight
+        self._loading = None                    # LoadingWindow shown while parsing
 
     # macOS delivers double-clicked / "Open With" files as a FileOpen event.
     def event(self, e):
@@ -246,12 +249,57 @@ class ViewerApp(QApplication):
         return view
 
     def open_path(self, path: str):
-        try:
-            layout = DxfLayout(path)
-        except Exception as ex:  # noqa: BLE001 - surface any load failure to the user
-            QMessageBox.critical(None, "Open failed", f"Could not open:\n{path}\n\n{ex}")
-            return None
-        return self.add_layout(layout)
+        """Queue a file to open. Parsing runs on a background thread behind a
+        small "Opening…" window, so a large file or a slow (e.g. network-drive)
+        read gives immediate feedback instead of freezing the UI. Queued files
+        open one at a time -- also gentler on a busy disk / network mount."""
+        self._open_queue.append(path)
+        self._pump_open_queue()
+
+    def _pump_open_queue(self):
+        """Start the next queued parse, or tear the loading UI down when idle."""
+        if self._opening:
+            return
+        if not self._open_queue:
+            self._hide_loading()
+            self._maybe_show_welcome()          # nothing opened -> fall back to welcome
+            return
+        path = self._open_queue.pop(0)
+        self._opening = True
+        self._show_loading(os.path.basename(path))
+        self._open_thread = _ParseThread(path, self)
+        self._open_thread.done.connect(
+            lambda layout, p=path: self._on_open_parsed(p, layout))
+        self._open_thread.finished.connect(self._open_thread.deleteLater)
+        self._open_thread.start()
+
+    def _on_open_parsed(self, path, layout):
+        self._opening = False
+        if layout is None:
+            QMessageBox.critical(None, "Open failed", f"Could not open:\n{path}")
+        else:
+            self.add_layout(layout)             # shows the main window, retires welcome
+        self._pump_open_queue()                 # next file, or hide loading + maybe welcome
+
+    def _show_loading(self, name: str):
+        if self._loading is None:
+            self._loading = LoadingWindow()
+        self._loading.set_name(name)
+        self._loading.center()
+        self._loading.show()
+        self._loading.raise_()
+        self._loading.activateWindow()
+
+    def _hide_loading(self):
+        if self._loading is not None:
+            self._loading.hide()
+
+    def _maybe_show_welcome(self):
+        """Show the welcome screen only when truly idle: no window open, nothing
+        parsing, and nothing queued (so a slow open never flashes it)."""
+        if (self.windows_open == 0 and not self._opening and not self._open_queue
+                and self._welcome is None):
+            self.show_welcome()
 
     def show_welcome(self):
         if self._welcome is None:
@@ -337,11 +385,9 @@ def main(argv=None) -> int:
 
     # If nothing opened (and no macOS FileOpen event arrives shortly), show the
     # welcome screen. Closing it (without opening a file) quits the app.
-    def _welcome_if_idle():
-        if app.windows_open == 0:
-            app.show_welcome()
-
-    QTimer.singleShot(250, _welcome_if_idle)
+    # _maybe_show_welcome holds off while a file is still parsing, so a slow
+    # open shows the "Opening…" window rather than briefly flashing welcome.
+    QTimer.singleShot(250, app._maybe_show_welcome)
     return app.exec()
 
 
