@@ -85,6 +85,17 @@ def stylesheet() -> str:
     QCheckBox::indicator:hover {{ border: 1px solid {accent}; }}
     QCheckBox::indicator:checked {{ background: {accent}; border: 1px solid {accent}; }}
 
+    QTabWidget::pane {{ border: none; background: {canvas}; }}
+    QTabBar {{ background: {canvas}; }}
+    QTabBar::tab {{
+        background: {canvas}; color: {muted}; border: none;
+        border-right: 1px solid {hair}; border-bottom: 2px solid transparent;
+        padding: 6px 16px; font-family: {MONO}; font-size: 12px;
+    }}
+    QTabBar::tab:selected {{ color: {ink}; border-bottom: 2px solid {accent}; }}
+    QTabBar::tab:!selected:hover {{ color: {ink}; }}
+    QTabBar::close-button {{ padding: 2px; }}
+
     QMenuBar {{ color: {muted}; font-family: {MONO}; }}
     QMenuBar::item {{ background: transparent; padding: 4px 10px; }}
     QMenuBar::item:selected {{ background: rgba(255,255,255,0.08); color: {ink}; }}
