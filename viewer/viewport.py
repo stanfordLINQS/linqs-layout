@@ -73,6 +73,19 @@ class GLViewport(QOpenGLWidget):
             f'<span style="color:{a}">x</span> {wx:,.1f}'
             f'&nbsp;&nbsp;&nbsp;<span style="color:{a}">y</span> {wy:,.1f}')
 
+    def emit_status_at_cursor(self):
+        """Populate the status bar from the cursor's current position, without
+        waiting for a mouseMoveEvent. A move event only fires once the OS
+        cursor actually crosses into the widget -- if a tab/window appears
+        under an already-stationary cursor (e.g. the common case of opening a
+        file: click Open, the layout loads, the cursor hasn't moved since),
+        no such event ever comes and the status bar sits blank until the user
+        happens to nudge the mouse. Called whenever this tab becomes current."""
+        from PySide6.QtGui import QCursor
+        local = self.mapFromGlobal(QCursor.pos())
+        if self.rect().contains(local):
+            self._emit_status(local.x(), local.y())
+
     # -- GL lifecycle -----------------------------------------------------
     def initializeGL(self):
         import moderngl
@@ -87,6 +100,13 @@ class GLViewport(QOpenGLWidget):
         # an early, smaller layout size.
         if self.scene is not None and not self._user_view:
             self.cam.fit(self._layout.bbox())
+        # Belt-and-suspenders for emit_status_at_cursor: the very first time a
+        # window appears, its on-screen geometry may not be final yet at the
+        # point _tab_changed's deferred call runs, so a stationary cursor
+        # could be (wrongly) judged as outside the widget. resizeGL fires
+        # again once layout truly settles, so retry here too -- harmless if
+        # the first attempt already got it right.
+        self.emit_status_at_cursor()
 
     def paintGL(self):
         fbo = self.ctx.detect_framebuffer()

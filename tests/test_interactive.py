@@ -51,7 +51,7 @@ def _check(name, ok, detail="") -> bool:
 
 def main() -> int:
     from PySide6.QtCore import QPoint, QPointF, Qt, QTimer
-    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtGui import QCursor, QWheelEvent
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QDialog
 
@@ -225,6 +225,30 @@ def main() -> int:
             QApplication.processEvents()
             ok("second tab added", win.tabs.count() == tabs_before + 1)
             shot("two_tabs")
+
+            print("[status bar populates on tab-open even with a stationary cursor]")
+            # Regression: a mouseMoveEvent only fires once the OS cursor
+            # actually crosses into the widget. If a new tab appears under an
+            # already-stationary cursor (the common real case: click Open, the
+            # file loads, the cursor hasn't moved since), no such event ever
+            # comes and the status bar used to sit blank until the user
+            # happened to nudge the mouse. QTest.mouseMove only synthesizes a
+            # Qt-level event, not a real OS cursor move, so QCursor.setPos is
+            # used here to test the real code path (emit_status_at_cursor
+            # reads the actual OS cursor position via QCursor.pos()).
+            cur_view = win._cur()
+            cur_vp = cur_view.viewport
+            center_global = cur_vp.mapToGlobal(QPoint(cur_vp.width() // 2, cur_vp.height() // 2))
+            QCursor.setPos(center_global)
+            QApplication.processEvents()
+            win._status.clear()
+            win.tabs.setCurrentIndex(0 if win.tabs.currentIndex() != 0 else 1)  # trigger _tab_changed
+            for _ in range(4):
+                QApplication.processEvents()
+                time.sleep(0.02)
+            status_text = win._status.text()
+            ok("status bar shows x/y without any mouse-move event, cursor already stationary",
+               "x</span>" in status_text and "y</span>" in status_text, status_text[:80])
 
             print("[tabs: switch / reorder / close]")
             win.tabs.setCurrentIndex(0)

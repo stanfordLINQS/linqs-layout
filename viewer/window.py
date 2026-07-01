@@ -186,6 +186,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"LINQS Layout — {name}")
         self._status.clear()
         self._status_file.setText(name)
+        # Deferred (not called synchronously here): a brand-new tab's viewport
+        # may not have its final geometry laid out yet at this exact point, so
+        # mapping the cursor position now could use a stale/zero size. Letting
+        # this run on the next event-loop turn ensures layout has settled.
+        QTimer.singleShot(0, view.viewport.emit_status_at_cursor)
 
     def _close_tab(self, idx):
         view = self.tabs.widget(idx)
