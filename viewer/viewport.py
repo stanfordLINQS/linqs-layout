@@ -54,6 +54,18 @@ class GLViewport(QOpenGLWidget):
         self._measure_move_timer.timeout.connect(self._on_measure_move_timeout)
 
         self.status_sink = None                 # callable(str): bottom status strip
+        # Catch-all for emit_status_at_cursor: there is no single Qt event for
+        # "this widget's content changed while the cursor was already sitting
+        # on top of it and never physically moved" (new tab, resize settling,
+        # etc. can all leave the status bar blank otherwise -- confirmed by
+        # hand that hooking just tab-change + resize still missed a case).
+        # Cheap (a position compare + an occasional label set), so it just
+        # runs for the viewport's whole lifetime rather than trying to
+        # enumerate every trigger moment.
+        self._status_poll_timer = QTimer(self)
+        self._status_poll_timer.setInterval(150)
+        self._status_poll_timer.timeout.connect(self.emit_status_at_cursor)
+        self._status_poll_timer.start()
 
         self.overlay = MeasureOverlay(self)
         self.overlay.setGeometry(0, 0, self.width(), self.height())
@@ -69,18 +81,34 @@ class GLViewport(QOpenGLWidget):
             return
         wx, wy = self.cam.screen_to_world(px, py)
         a = "#%02x%02x%02x" % style.ACCENT
+        # The numeric values need their own explicit color: QStatusBar's
+        # stylesheet rule (color: muted -- a dim gray, chosen for the
+        # filename/static labels elsewhere in the strip) would otherwise be
+        # the only color applied to this rich-text label, since only the
+        # "x"/"y" letters get an inline color here. On a real monitor that
+        # dim gray on the near-black canvas background is barely legible at
+        # 11px -- reported as "the x/y letters are there but the numbers
+        # aren't". Ink is the same bright color used for primary body text.
+        ink = "#%02x%02x%02x" % style.INK
         self.status_sink(
-            f'<span style="color:{a}">x</span> {wx:,.1f}'
-            f'&nbsp;&nbsp;&nbsp;<span style="color:{a}">y</span> {wy:,.1f}')
+            f'<span style="color:{a}">x</span> <span style="color:{ink}">{wx:,.1f}</span>'
+            f'&nbsp;&nbsp;&nbsp;<span style="color:{a}">y</span> <span style="color:{ink}">{wy:,.1f}</span>')
 
     def emit_status_at_cursor(self):
         """Populate the status bar from the cursor's current position, without
         waiting for a mouseMoveEvent. A move event only fires once the OS
-        cursor actually crosses into the widget -- if a tab/window appears
-        under an already-stationary cursor (e.g. the common case of opening a
-        file: click Open, the layout loads, the cursor hasn't moved since),
-        no such event ever comes and the status bar sits blank until the user
-        happens to nudge the mouse. Called whenever this tab becomes current."""
+        cursor actually crosses into the widget -- there is no Qt event for
+        "this widget's content/visibility changed while the cursor was
+        already sitting on top of it and never physically moved", which is
+        the actual gap: opening a file, switching tabs, or a window being
+        resized while the cursor happens to already be positioned over the
+        canvas all leave the status bar blank indefinitely otherwise. Calling
+        this from a few specific triggers (tab change, resize) narrows the
+        window but doesn't close it (confirmed: a resize-then-cursor-move-
+        with-no-further-trigger sequence still went unnoticed) -- see the
+        periodic timer in __init__ for the actual fix; this method is also
+        called directly at those trigger points for a faster response when
+        they do line up."""
         from PySide6.QtGui import QCursor
         local = self.mapFromGlobal(QCursor.pos())
         if self.rect().contains(local):
