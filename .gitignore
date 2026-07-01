@@ -3,9 +3,6 @@
 # ...except the tiny synthetic fixture used by the smoke test (keep it tracked):
 !tests/sample.dxf
 
-# Cached polygon triangulation sidecars (<file>.trifill.npz)
-*.npz
-
 # Compiled native artifacts
 *.dylib
 *.so

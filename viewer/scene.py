@@ -207,7 +207,6 @@ class GLScene:
         self._wind_size = None
         self._raw_pos = None
         self.fill_vao = None
-        self.real_fill_vao = None        # set by install_triangulated_fill, once ready
         self._build_polylines(ctx, layout)
         self._build_fill(ctx, layout)
         self._build_circles(ctx, layout)
@@ -388,30 +387,6 @@ class GLScene:
             return None
         return (x0, y0, x1 - x0, y1 - y0)
 
-    def install_triangulated_fill(self, idx, fill_off, fill_count) -> None:
-        """Swap the wind pass's per-layer triangle source from the naive fan
-        to a real (non-overlapping) triangulation, computed by
-        ``viewer.triangulate.compute_real_fill`` -- typically on a background
-        thread, since it's pure numpy/earcut with no GL calls, then handed to
-        this method on the GL-owning thread once ready.
-
-        The winding rule + cover pass are unchanged (still required for
-        correctness: they're what makes two overlapping same-layer polygons
-        blend exactly once per pixel, not the triangulation) -- only the
-        triangle data the wind pass rasterizes changes, cutting its fragment
-        count for polygons where a fan would have self-overlapped heavily.
-        Until this is called, draw() keeps using the (always-correct, just
-        more wind-pass overdraw on complex geometry) fan fallback.
-        """
-        idx = np.ascontiguousarray(idx, np.uint32)
-        if self.real_fill_vao is not None:
-            self.real_fill_vao.release()
-        self.real_fill_vao = self.ctx.vertex_array(
-            self.wind_prog, [(self._pos_buf, "2f", "in_pos")],
-            index_buffer=self.ctx.buffer(idx.tobytes()), index_element_size=4)
-        self._real_fill_off = np.asarray(fill_off, np.int64)
-        self._real_fill_count = np.asarray(fill_count, np.int64)
-
     def draw(self, main_fbo, scale, offset, grid_spacing=None) -> None:
         """Render into ``main_fbo`` (already bound + cleared by the caller).
 
@@ -451,21 +426,15 @@ class GLScene:
             ctx.disable(moderngl.BLEND)
 
         # Pass 1a: per-layer winding fills for polygons, scissored to each
-        # layer's on-screen bbox. The winding rule + cover pass are what make
-        # two overlapping same-layer polygons blend exactly once per pixel --
-        # that's still needed regardless of triangulation, so it always runs.
-        # What changes per layer is which triangle source feeds the wind
-        # pass: the real (non-overlapping) triangulation from
-        # viewer.triangulate once install_triangulated_fill has set it up
-        # (typically a few seconds after load -- computed on a background
-        # thread since it's too slow on complex geometry to block initial
-        # load), or the naive fan fallback before then / for layers it
-        # doesn't cover. The wind pass's clear + rasterization cost is
-        # fragment-fill-rate bound (profiled: ~1.85ms at 30k px vs ~41ms at
-        # 5M px for the same geometry) -- real triangulation (vs. a
-        # self-overlapping fan) helps a little, and wind_downsample (see
-        # __init__) trades fill-edge precision for a direct ~N^2 cut to this
-        # pass's pixel count when set > 1.
+        # layer's on-screen bbox. Fill is a triangle *fan* per polygon resolved
+        # by the GPU winding rule + a single per-layer cover pass -- no
+        # triangulation; the winding rule is what makes a concave polygon's
+        # self-overlapping fan and two overlapping same-layer polygons each
+        # blend exactly once per pixel. The wind pass's clear + rasterization
+        # cost is fragment-fill-rate bound (profiled: ~1.85ms at 30k px vs
+        # ~41ms at 5M px for the same geometry), so scissoring to each layer's
+        # bbox and wind_downsample (see __init__, which trades fill-edge
+        # precision for a ~N^2 cut to this pass's pixel count) are the levers.
         if self.show_fill and self.fill_vao is not None:
             self._ensure_wind(main_fbo.size)
             self.cover_prog["u_wind"].value = 0
@@ -475,12 +444,8 @@ class GLScene:
             ctx.enable(moderngl.BLEND)
             W, H = main_fbo.size
             wW, wH = self._wind_fbo.size
-            real_ready = self.real_fill_vao is not None
             for lid in range(self.n_layers):
-                if real_ready:
-                    vao, cnt, off = self.real_fill_vao, int(self._real_fill_count[lid]), int(self._real_fill_off[lid])
-                else:
-                    vao, cnt, off = self.fill_vao, int(self._fill_count[lid]), int(self._fill_off[lid])
+                cnt, off = int(self._fill_count[lid]), int(self._fill_off[lid])
                 if cnt == 0 or self.visible[lid] < 0.5:
                     continue
                 rect = self._screen_scissor(lid, scale, offset, W, H)
@@ -496,7 +461,7 @@ class GLScene:
                 self._wind_fbo.use()
                 ctx.clear(0.0)
                 ctx.blend_func = moderngl.ONE, moderngl.ONE          # accumulate winding
-                vao.render(moderngl.TRIANGLES, vertices=cnt, first=off)
+                self.fill_vao.render(moderngl.TRIANGLES, vertices=cnt, first=off)
 
                 main_fbo.scissor = rect
                 main_fbo.use()

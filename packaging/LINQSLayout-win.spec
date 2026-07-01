@@ -17,7 +17,7 @@ with open(os.path.join(ROOT, "viewer", "__init__.py")) as _f:
 datas = [(os.path.join(ROOT, "dxfcore", "dxfcore.dll"), "dxfcore")]
 binaries = []
 hiddenimports = ["glcontext", "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets"]
-for pkg in ("moderngl", "glcontext", "mapbox_earcut"):
+for pkg in ("moderngl", "glcontext"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b

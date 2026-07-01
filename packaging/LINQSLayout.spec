@@ -29,7 +29,7 @@ a = Analysis(
     excludes=[
         "PyQt6", "PyQt5", "PySide2", "shiboken2",   # avoid clashing Qt bindings
         "matplotlib", "tkinter", "scipy", "pandas", "IPython",
-        "pytest", "mapbox_earcut",
+        "pytest",
     ],
     noarchive=False,
 )

@@ -4,4 +4,3 @@ numpy>=2.0
 moderngl>=5.10        # GPU rendering (OpenGL 3.3+ core)
 PySide6>=6.5          # interactive window + layer panel
 Pillow>=10.0          # PNG output for the headless renderer
-mapbox_earcut>=2.0    # real polygon triangulation for fill rendering (background thread)
