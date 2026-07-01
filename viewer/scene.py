@@ -166,6 +166,10 @@ class GLScene:
 
     def __init__(self, ctx, layout, fill_alpha: float = _DEFAULT_FILL_ALPHA):
         self.ctx = ctx
+        # Every GL object we allocate, so release() can free them on reload.
+        # moderngl does not free GL resources on Python GC by default, so a
+        # rebuilt scene would otherwise leak GPU buffers/programs each reload.
+        self._owned: list = []
         self.n_layers = max(layout.n_layers, 1)
         self.colors = layer_colors(self.n_layers)
         self.visible = np.ones(self.n_layers, np.float32)
@@ -188,20 +192,20 @@ class GLScene:
         self.wind_downsample = 2
 
         maxl = str(self.n_layers)
-        self.outline_prog = ctx.program(
-            vertex_shader=_VERT_OUTLINE.replace("MAXL", maxl), fragment_shader=_FRAG_COLOR)
-        self.circ_prog = ctx.program(
-            vertex_shader=_VERT_CIRCLE.replace("MAXL", maxl), fragment_shader=_FRAG_COLOR)
-        self.wind_prog = ctx.program(vertex_shader=_VERT_WIND, fragment_shader=_FRAG_WIND)
-        self.cover_prog = ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_COVER)
-        self.grid_prog = ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_GRID)
+        self.outline_prog = self._own(ctx.program(
+            vertex_shader=_VERT_OUTLINE.replace("MAXL", maxl), fragment_shader=_FRAG_COLOR))
+        self.circ_prog = self._own(ctx.program(
+            vertex_shader=_VERT_CIRCLE.replace("MAXL", maxl), fragment_shader=_FRAG_COLOR))
+        self.wind_prog = self._own(ctx.program(vertex_shader=_VERT_WIND, fragment_shader=_FRAG_WIND))
+        self.cover_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_COVER))
+        self.grid_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_GRID))
         for prog in (self.outline_prog, self.circ_prog):
             prog["u_color"].write(self.colors.tobytes())
 
         fs = np.array([-1, -1, 3, -1, -1, 3], np.float32)      # fullscreen triangle
-        fs_buf = ctx.buffer(fs.tobytes())
-        self.cover_vao = ctx.vertex_array(self.cover_prog, [(fs_buf, "2f", "in_p")])
-        self.grid_vao = ctx.vertex_array(self.grid_prog, [(fs_buf, "2f", "in_p")])
+        fs_buf = self._own(ctx.buffer(fs.tobytes()))
+        self.cover_vao = self._own(ctx.vertex_array(self.cover_prog, [(fs_buf, "2f", "in_p")]))
+        self.grid_vao = self._own(ctx.vertex_array(self.grid_prog, [(fs_buf, "2f", "in_p")]))
 
         self._wind_tex = self._wind_fbo = None
         self._wind_size = None
@@ -210,6 +214,29 @@ class GLScene:
         self._build_polylines(ctx, layout)
         self._build_fill(ctx, layout)
         self._build_circles(ctx, layout)
+
+    # -- lifetime ---------------------------------------------------------
+    def _own(self, obj):
+        """Track a GL object (buffer/program/VAO) so release() can free it."""
+        self._owned.append(obj)
+        return obj
+
+    def release(self) -> None:
+        """Free every GL object this scene allocated. Call inside an active
+        context before dropping the scene (e.g. on reload) — moderngl does not
+        release GL resources on garbage collection by default."""
+        if self._wind_fbo is not None:
+            self._wind_fbo.release()
+            self._wind_fbo = None
+        if self._wind_tex is not None:
+            self._wind_tex.release()
+            self._wind_tex = None
+        for obj in self._owned:
+            try:
+                obj.release()
+            except Exception:       # noqa: BLE001 - best-effort teardown
+                pass
+        self._owned = []
 
     # -- geometry upload --------------------------------------------------
     def _build_polylines(self, ctx, layout) -> None:
@@ -229,8 +256,8 @@ class GLScene:
         # and the fill pass index into these, so the GPU assembles the primitives
         # and the CPU never expands a per-edge segment buffer or duplicates verts.
         vert_layer = np.clip(np.repeat(layer, count), 0, self.n_layers - 1).astype(np.float32)
-        self._pos_buf = ctx.buffer(verts.tobytes())
-        self._lay_buf = ctx.buffer(vert_layer.tobytes())
+        self._pos_buf = self._own(ctx.buffer(verts.tobytes()))
+        self._lay_buf = self._own(ctx.buffer(vert_layer.tobytes()))
 
         # Outline edges as GL_LINES element indices: (i, next(i)), wrapping the
         # last vertex of a closed polyline back to its start.
@@ -240,10 +267,11 @@ class GLScene:
         line_idx = np.empty((n, 2), np.uint32)
         line_idx[:, 0] = np.arange(n, dtype=np.uint32)
         line_idx[:, 1] = nxt.astype(np.uint32)
-        self.line_vao = ctx.vertex_array(
+        self.line_vao = self._own(ctx.vertex_array(
             self.outline_prog,
             [(self._pos_buf, "2f", "in_pos"), (self._lay_buf, "1f", "in_layer")],
-            index_buffer=ctx.buffer(line_idx.reshape(-1).tobytes()), index_element_size=4)
+            index_buffer=self._own(ctx.buffer(line_idx.reshape(-1).tobytes())),
+            index_element_size=4))
 
     def _build_fill(self, ctx, layout) -> None:
         """Build the layer-sorted triangle-fan index buffer + per-layer ranges."""
@@ -296,9 +324,9 @@ class GLScene:
             self._layer_xmin = self._layer_ymin = np.full(self.n_layers, np.inf)
             self._layer_xmax = self._layer_ymax = np.full(self.n_layers, -np.inf)
 
-        self.fill_vao = ctx.vertex_array(
+        self.fill_vao = self._own(ctx.vertex_array(
             self.wind_prog, [(self._pos_buf, "2f", "in_pos")],   # shared vertex buffer
-            index_buffer=ctx.buffer(idx.tobytes()), index_element_size=4)
+            index_buffer=self._own(ctx.buffer(idx.tobytes())), index_element_size=4))
 
     def _build_circles(self, ctx, layout) -> None:
         circ = np.asarray(layout.circ, np.float32)
@@ -310,7 +338,7 @@ class GLScene:
         inst = np.empty((self.n_circ, 4), np.float32)
         inst[:, :3] = circ
         inst[:, 3] = np.clip(clayer, 0, self.n_layers - 1)
-        inst_buf = ctx.buffer(inst.tobytes())
+        inst_buf = self._own(ctx.buffer(inst.tobytes()))
 
         th = np.linspace(0.0, 2.0 * np.pi, _CIRCLE_SEGMENTS, endpoint=False)
         ring = np.stack([np.cos(th), np.sin(th)], axis=1).astype(np.float32)
@@ -321,10 +349,10 @@ class GLScene:
         self._fan_n = _CIRCLE_SEGMENTS + 2
 
         inst_fmt = (inst_buf, "3f 1f/i", "in_circ", "in_clayer")
-        self.circ_loop_vao = ctx.vertex_array(
-            self.circ_prog, [(ctx.buffer(ring.tobytes()), "2f", "in_unit"), inst_fmt])
-        self.circ_fan_vao = ctx.vertex_array(
-            self.circ_prog, [(ctx.buffer(fan.tobytes()), "2f", "in_unit"), inst_fmt])
+        self.circ_loop_vao = self._own(ctx.vertex_array(
+            self.circ_prog, [(self._own(ctx.buffer(ring.tobytes())), "2f", "in_unit"), inst_fmt]))
+        self.circ_fan_vao = self._own(ctx.vertex_array(
+            self.circ_prog, [(self._own(ctx.buffer(fan.tobytes())), "2f", "in_unit"), inst_fmt]))
 
     # -- per-frame state --------------------------------------------------
     def set_layer_visible(self, layer_id: int, visible: bool) -> None:

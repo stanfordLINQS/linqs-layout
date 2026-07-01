@@ -229,3 +229,31 @@ class GLViewport(QOpenGLWidget):
         self._user_view = False        # resume auto-fit (until the next pan/zoom)
         self.cam.fit(self._layout.bbox())
         self._refresh()
+
+    def reload_layout(self, layout):
+        """Swap in a freshly-parsed layout (same file, changed on disk): rebuild
+        the GPU scene from scratch, carrying over the current view and display
+        state. The old scene's GL objects are released first so repeated reloads
+        don't leak. The caller keeps the *new* layout alive and closes the old
+        one only after this returns (the scene aliases the layout's arrays)."""
+        self._layout = layout
+        self.snap = None                # rebuilt lazily against the new geometry
+        self.clear_measure()            # old measurement refers to the old geometry
+        if self.ctx is None:
+            return                      # GL not initialized yet; initializeGL will build it
+        old = self.scene
+        self.makeCurrent()
+        try:
+            scene = GLScene(self.ctx, layout)
+            if old is not None:         # carry over view-independent display state
+                scene.show_fill = old.show_fill
+                scene.show_grid = old.show_grid
+            scene.set_shade(0.55 if self._light else 1.0)
+            if old is not None:
+                old.release()
+            self.scene = scene
+        finally:
+            self.doneCurrent()
+        if not self._user_view:         # keep the user's pan/zoom; refit only if untouched
+            self.cam.fit(self._layout.bbox())
+        self._refresh()
