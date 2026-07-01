@@ -1,0 +1,27 @@
+name: Release asset check
+
+# Flag any release that is missing a per-OS installer (.dmg or .exe). macOS and
+# Windows builds are cut on separate machines, so it's easy to publish a release
+# with only one platform's asset -- which breaks the other platform's in-app
+# updater. Re-runs on `edited` so it flips green once you attach the missing one.
+on:
+  release:
+    types: [published, released, edited]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to check (blank = latest)"
+        required: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Verify both installers are attached
+        run: |
+          TAG="${{ github.event.release.tag_name || github.event.inputs.tag || 'latest' }}"
+          python packaging/check_release_assets.py "$TAG"

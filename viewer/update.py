@@ -31,7 +31,14 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 from . import __version__
 
 REPO = "stanfordLINQS/linqs-layout"
-API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
+# We scan the releases *list* (newest first) rather than /releases/latest: mac and
+# Windows builds are cut from separate machines and can't cross-compile, so a
+# release can exist carrying only the *other* OS's asset (this has happened
+# repeatedly). Trusting /releases/latest and then failing to find our asset is
+# exactly what produced the "Could not download the update" dead-end. Instead we
+# pick the newest release that actually ships THIS OS's installer, so an update is
+# only ever offered when it can actually be installed.
+API_RELEASES = f"https://api.github.com/repos/{REPO}/releases?per_page=30"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 
 _IS_MAC = sys.platform == "darwin"
@@ -57,25 +64,57 @@ def _asset_suffix() -> str | None:
     return None
 
 
-def _fetch_latest():
-    """Return (version, asset_url) for the latest release on this OS, or (None, None).
+def _fetch_releases():
+    """The repo's releases as a list, newest first (raises on network error)."""
+    req = urllib.request.Request(
+        API_RELEASES,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "linqs-layout"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.load(r)
 
-    ``asset_url`` is the OS-appropriate installer asset (``.dmg`` / ``.exe``)."""
+
+def _asset_url(release, suffix: str):
+    """URL of ``release``'s first asset whose name ends with ``suffix``, else None."""
+    return next((a.get("browser_download_url") for a in release.get("assets", [])
+                 if str(a.get("name", "")).lower().endswith(suffix)), None)
+
+
+def _fetch_latest():
+    """Return (version, asset_url) for the newest *installable-on-this-OS* release,
+    or (None, None) on a network error / when no release ships this OS's asset.
+
+    On a supported OS this is the highest-version release that actually carries
+    the OS-appropriate installer (``.dmg`` / ``.exe``) -- never a release that
+    only has the other platform's asset (which could not be downloaded here). On
+    an unsupported OS (no in-app installer) it reports the newest version overall
+    so the caller can still point at the releases page. Draft/prerelease entries
+    are skipped, so a half-published release is never targeted."""
+    suf = _asset_suffix()
     try:
-        req = urllib.request.Request(
-            API_LATEST,
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "linqs-layout"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            data = json.load(r)
-        ver = (data.get("tag_name") or "").lstrip("v") or None
-        suf = _asset_suffix()
-        url = None
-        if suf:
-            url = next((a.get("browser_download_url") for a in data.get("assets", [])
-                        if str(a.get("name", "")).lower().endswith(suf)), None)
-        return ver, url
+        releases = _fetch_releases()
     except Exception:
         return None, None
+
+    newest_any = None                 # highest version overall (unsupported-OS path)
+    best_ver, best_url, best_vt = None, None, ()
+    for rel in releases:
+        if rel.get("draft") or rel.get("prerelease"):
+            continue
+        ver = (rel.get("tag_name") or "").lstrip("v") or None
+        if not ver:
+            continue
+        vt = _vt(ver)
+        if newest_any is None or vt > _vt(newest_any):
+            newest_any = ver
+        if suf is None:
+            continue
+        url = _asset_url(rel, suf)
+        if url and vt > best_vt:       # newest version that ships our installer
+            best_ver, best_url, best_vt = ver, url, vt
+
+    if suf is None:
+        return newest_any, None
+    return best_ver, best_url
 
 
 def latest_version() -> str | None:

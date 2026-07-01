@@ -50,46 +50,83 @@ class _FakeResponse:
         return self._body
 
 
-def _release(tag: str, asset_names: list[str]) -> dict:
+def _release(tag: str, asset_names: list[str], **extra) -> dict:
     return {
         "tag_name": tag,
         "assets": [{"name": n, "browser_download_url": f"https://example/{n}"} for n in asset_names],
+        **extra,        # e.g. draft=True / prerelease=True
     }
 
 
 def test_mocked_responses() -> bool:
+    """_fetch_latest now scans the releases *list* and returns the newest release
+    that actually ships THIS OS's installer -- never one carrying only the other
+    platform's asset. Mocks return a list (newest first), like the real API."""
     import urllib.request
 
     from viewer import update
 
     ok = True
     real_urlopen = urllib.request.urlopen
+    suf = update._asset_suffix()                    # ".dmg" mac / ".exe" win / None
+    ours = suf or ".dmg"                            # a concrete "our OS" asset name
+    other = ".exe" if ours == ".dmg" else ".dmg"    # the *other* platform's asset
 
-    # -- newer version, with a matching .exe asset --------------------------
-    urllib.request.urlopen = lambda *a, **k: _FakeResponse(
-        _release("v9.9.9", ["LINQS-Layout-Setup-9.9.9.exe", "LINQS-Layout.dmg"]))
+    def mock(releases):
+        urllib.request.urlopen = lambda *a, **k: _FakeResponse(releases)
+
+    # -- newest release ships our asset -> take it --------------------------
+    mock([_release("v9.9.9", [f"setup{other}", f"LINQS-Layout{ours}"])])
     try:
         ver, url = update._fetch_latest()
-        ok &= _check("newer + matching asset: version", ver, "9.9.9")
-        ok &= _check("newer + matching asset: url found", url is not None, True)
-        if url is not None:
-            ok &= _check("matching asset: url suffix", url.endswith(".exe"), True)
+        ok &= _check("newest has our asset: version", ver, "9.9.9")
+        if suf is not None:
+            ok &= _check("newest has our asset: url found", url is not None, True)
+            if url is not None:
+                ok &= _check("newest has our asset: url suffix", url.endswith(suf), True)
     finally:
         urllib.request.urlopen = real_urlopen
 
-    # -- newer version, but no asset for this OS (the real v1.0.9 case) -----
-    urllib.request.urlopen = lambda *a, **k: _FakeResponse(
-        _release("v9.9.9", ["LINQS-Layout.dmg"]))
+    # -- REGRESSION (v1.0.17): newest release lacks our asset, but an older -----
+    #    one has it -> we must fall back to that older *installable* release,
+    #    never fail with "could not download".
+    mock([
+        _release("v9.9.9", [f"setup-9.9.9{other}"]),          # newest, other OS only
+        _release("v9.9.8", [f"setup-9.9.8{other}", f"LINQS-Layout{ours}"]),  # ours here
+        _release("v9.9.7", [f"LINQS-Layout{ours}"]),
+    ])
     try:
         ver, url = update._fetch_latest()
-        ok &= _check("no matching asset: version still parsed", ver, "9.9.9")
-        ok &= _check("no matching asset: url is None", url, None)
-        # _win_download must fail gracefully (None), not raise, when there's no asset.
-        try:
-            result = update._win_download()
-            ok &= _check("_win_download returns None gracefully", result, None)
-        except Exception as ex:  # noqa: BLE001
-            ok &= _check("_win_download raised (should not)", repr(ex), None)
+        if suf is not None:
+            ok &= _check("fallback to newest installable: version", ver, "9.9.8")
+            ok &= _check("fallback to newest installable: url is our OS's",
+                         bool(url) and url.endswith(suf), True)
+    finally:
+        urllib.request.urlopen = real_urlopen
+
+    # -- no release ships our asset -> (None, None), degrade gracefully -----
+    mock([_release("v9.9.9", [f"setup{other}"])])
+    try:
+        ver, url = update._fetch_latest()
+        if suf is not None:
+            ok &= _check("no installable release: version is None", ver, None)
+            ok &= _check("no installable release: url is None", url, None)
+            # download helpers must return None (not raise) with no asset.
+            ok &= _check("_win_download returns None gracefully", update._win_download(), None)
+            ok &= _check("_mac_install returns False gracefully", update._mac_install(), False)
+    finally:
+        urllib.request.urlopen = real_urlopen
+
+    # -- draft / prerelease entries are skipped -----------------------------
+    mock([
+        _release("v9.9.9", [f"setup-9.9.9{other}", f"LINQS-Layout{ours}"], draft=True),
+        _release("v9.9.8", [f"setup-9.9.8{other}", f"LINQS-Layout{ours}"], prerelease=True),
+        _release("v9.9.7", [f"setup-9.9.7{other}", f"LINQS-Layout{ours}"]),
+    ])
+    try:
+        ver, _ = update._fetch_latest()
+        if suf is not None:
+            ok &= _check("draft/prerelease skipped: picks published", ver, "9.9.7")
     finally:
         urllib.request.urlopen = real_urlopen
 
@@ -108,7 +145,8 @@ def test_mocked_responses() -> bool:
     # -- version comparison ----------------------------------------------------
     ok &= _check("_vt parses dotted versions", update._vt("v1.2.3"), (1, 2, 3))
     ok &= _check("current <= current is not an update", update._vt("1.0.9") <= update._vt("1.0.9"), True)
-    ok &= _check("OS asset suffix on Windows", update._asset_suffix(), ".exe")
+    ok &= _check("OS asset suffix matches platform", suf, ".dmg" if sys.platform == "darwin"
+                 else ".exe" if sys.platform.startswith("win") else None)
 
     return ok
 
