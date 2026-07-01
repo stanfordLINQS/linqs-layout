@@ -21,6 +21,6 @@ toggling a layer is a one-float uniform write with no buffer rebuild.
 from .camera import Camera2D
 from .scene import GLScene
 
-__version__ = "1.0.17"       # single source of truth (read by the spec + update check)
+__version__ = "1.0.18"       # single source of truth (read by the spec + update check)
 
 __all__ = ["GLScene", "Camera2D", "__version__"]
