@@ -16,7 +16,7 @@ with open(os.path.join(ROOT, "viewer", "__init__.py")) as _f:
 # sibling 'dxfcore' dir via sys._MEIPASS), plus moderngl's GL-context backend.
 datas = [(os.path.join(ROOT, "dxfcore", "dxfcore.dll"), "dxfcore")]
 binaries = []
-hiddenimports = ["glcontext", "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets"]
+hiddenimports = ["glcontext", "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets", "PySide6.QtNetwork"]
 for pkg in ("moderngl", "glcontext"):
     d, b, h = collect_all(pkg)
     datas += d
