@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer
+from PySide6.QtCore import QFileSystemWatcher, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QMainWindow,
                                QSplitter, QTabWidget, QVBoxLayout, QWidget)
@@ -16,6 +16,26 @@ from . import style
 from .overlay import _mono
 from .panel import LayerPanel
 from .viewport import GLViewport
+
+
+class _ParseThread(QThread):
+    """Reparse a DXF off the UI thread. The C parse (ctypes) releases the GIL, so
+    the window stays responsive -- no beach ball -- while a large file loads.
+    Emits the new DxfLayout, or None if the parse failed (e.g. a half-written
+    file)."""
+
+    done = Signal(object)
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self._path = path
+
+    def run(self):
+        try:
+            layout = DxfLayout(self._path)
+        except Exception:                 # noqa: BLE001 - partial/locked file -> keep current
+            layout = None
+        self.done.emit(layout)
 
 
 class LayoutView(QWidget):
@@ -61,6 +81,10 @@ class LayoutView(QWidget):
         self._reload_timer.timeout.connect(self._maybe_reload)
         self._loaded_sig = self._file_sig()       # stat of what's on screen
         self._pending_sig = self._loaded_sig      # last stat seen while settling
+        self._parse = None                        # in-flight background parse thread
+        self._reloading = False
+        self._reload_again = False                # file changed again mid-parse
+        self._reload_sig = None                   # stat of the file being parsed
         self._watcher = QFileSystemWatcher(self)
         self._arm_watch()
         self._watcher.fileChanged.connect(self._on_fs_change)
@@ -102,23 +126,40 @@ class LayoutView(QWidget):
         if sig == self._loaded_sig:       # stable and identical to what we show
             return
         self.reload()
-        self._loaded_sig = self._pending_sig = self._file_sig()
 
     def reload(self):
         """Reparse the file on disk and rebuild the view in place, preserving the
-        camera, layer visibility, and display toggles. A parse failure (e.g. a
-        half-written file slipped past the stability gate) is swallowed and the
-        current view kept, so the viewer never blanks or crashes on a bad read."""
-        path = self.layout_obj.path
-        try:
-            new_layout = DxfLayout(path)
-        except Exception:                 # noqa: BLE001 - partial/locked file: keep current
+        camera, layer visibility, and display toggles. The parse runs on a
+        background thread (with a "Reloading…" indicator) so the window never
+        freezes / beach-balls while a large file loads; the GPU rebuild then
+        happens back on the UI thread once parsing finishes."""
+        if self._reloading:               # a parse is already running
+            self._reload_again = True     # coalesce: reparse once more when it's done
             return
-        old = self.layout_obj
-        self.layout_obj = new_layout
-        self.viewport.reload_layout(new_layout)   # rebuild GPU scene (keeps camera)
-        self.panel.reload_layout(new_layout)      # rebuild rows + reapply visibility
-        old.close()                               # free old C buffers (scene aliased them)
+        self._reloading = True
+        self._reload_sig = self._file_sig()
+        self.viewport.overlay.set_loading("Reloading…")
+        self._parse = _ParseThread(self.layout_obj.path, self)
+        self._parse.done.connect(self._on_parsed)
+        self._parse.finished.connect(self._parse.deleteLater)
+        self._parse.start()
+
+    def _on_parsed(self, new_layout):
+        """Back on the UI thread: swap in the freshly-parsed layout (if the parse
+        succeeded) and clear the indicator. A failed/partial read keeps the
+        current view. If the file changed again while we were parsing, go again."""
+        self._reloading = False
+        self.viewport.overlay.set_loading(None)
+        if new_layout is not None:
+            old = self.layout_obj
+            self.layout_obj = new_layout
+            self.viewport.reload_layout(new_layout)   # rebuild GPU scene (keeps camera)
+            self.panel.reload_layout(new_layout)      # rebuild rows + reapply visibility
+            old.close()                               # free old C buffers (scene aliased them)
+            self._loaded_sig = self._pending_sig = self._reload_sig
+        if self._reload_again:
+            self._reload_again = False
+            self.reload()
 
     def toggle_panel(self):
         """Show / hide the layer panel (L)."""
