@@ -109,6 +109,13 @@ class GLViewport(QOpenGLWidget):
         periodic timer in __init__ for the actual fix; this method is also
         called directly at those trigger points for a faster response when
         they do line up."""
+        # Background tabs share the active tab's geometry inside the QTabWidget,
+        # so their rect() still "contains" the cursor -- without this guard an
+        # inactive tab's poll timer would keep writing its own camera's coords
+        # to the shared status label, and the coordinates would revert to
+        # whichever tab won the race (usually the first one).
+        if not self.isVisible():
+            return
         from PySide6.QtGui import QCursor
         local = self.mapFromGlobal(QCursor.pos())
         if self.rect().contains(local):
