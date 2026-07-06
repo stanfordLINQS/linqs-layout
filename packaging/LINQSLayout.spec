@@ -13,7 +13,7 @@ with open(os.path.join(ROOT, "viewer", "__init__.py")) as _f:
 # sibling 'dxfcore' dir), plus moderngl's GL-context backend.
 datas = [(os.path.join(ROOT, "dxfcore", "libdxfcore.dylib"), "dxfcore")]
 binaries = []
-hiddenimports = ["glcontext", "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets"]
+hiddenimports = ["glcontext", "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets", "PySide6.QtNetwork"]
 for pkg in ("moderngl", "glcontext"):
     d, b, h = collect_all(pkg)
     datas += d
@@ -29,7 +29,7 @@ a = Analysis(
     excludes=[
         "PyQt6", "PyQt5", "PySide2", "shiboken2",   # avoid clashing Qt bindings
         "matplotlib", "tkinter", "scipy", "pandas", "IPython",
-        "pytest", "mapbox_earcut",
+        "pytest",
     ],
     noarchive=False,
 )

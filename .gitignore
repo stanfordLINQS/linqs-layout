@@ -1,18 +1,24 @@
 # Large reference data (kept locally, too big for GitHub)
 *.dxf
-
-# Cached polygon triangulation sidecars (<file>.trifill.npz)
-*.npz
+# ...except the tiny synthetic fixture used by the smoke test (keep it tracked):
+!tests/sample.dxf
 
 # Compiled native artifacts
 *.dylib
 *.so
 *.o
 *.a
+*.dll
+*.lib
+*.exp
+*.obj
+*.ilk
+*.pdb
 
 # Python
 __pycache__/
 *.pyc
+.venv/
 
 # Local-only dev files (kept on the maintainer's machine, not in the public repo)
 CLAUDE.md

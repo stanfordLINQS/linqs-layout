@@ -7,7 +7,7 @@ devicePixelRatio handling."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from . import style
@@ -16,6 +16,14 @@ from .offscreen import BG_DARK, BG_LIGHT
 from .overlay import MeasureOverlay
 from .scene import GLScene, nice_grid_spacing
 from .snap import Snapper
+
+# Snapping (Snapper.snap) is a full-geometry numpy scan -- a few ms on large
+# layouts. Recomputing it synchronously on every raw mouse-move event (no
+# coalescing, unlike paint/update()) can fall behind the OS's mouse-move rate
+# and visibly lag/jump, especially where Windows delivers move events faster
+# than macOS's more aggressively-coalesced ones. Throttle to one recompute
+# per ~frame instead, always using the latest position.
+_MEASURE_THROTTLE_MS = 16
 
 
 class GLViewport(QOpenGLWidget):
@@ -39,8 +47,25 @@ class GLViewport(QOpenGLWidget):
         self.snap_kind = None                   # 'corner' | 'edge' | None (live)
         self.snap: Snapper | None = None        # built lazily — keeps startup fast
         self.snap_px = 12
+        self._pending_measure_move = None       # (px, py, shift) awaiting throttled snap
+        self._measure_move_timer = QTimer(self)
+        self._measure_move_timer.setSingleShot(True)
+        self._measure_move_timer.setInterval(_MEASURE_THROTTLE_MS)
+        self._measure_move_timer.timeout.connect(self._on_measure_move_timeout)
 
         self.status_sink = None                 # callable(str): bottom status strip
+        # Catch-all for emit_status_at_cursor: there is no single Qt event for
+        # "this widget's content changed while the cursor was already sitting
+        # on top of it and never physically moved" (new tab, resize settling,
+        # etc. can all leave the status bar blank otherwise -- confirmed by
+        # hand that hooking just tab-change + resize still missed a case).
+        # Cheap (a position compare + an occasional label set), so it just
+        # runs for the viewport's whole lifetime rather than trying to
+        # enumerate every trigger moment.
+        self._status_poll_timer = QTimer(self)
+        self._status_poll_timer.setInterval(150)
+        self._status_poll_timer.timeout.connect(self.emit_status_at_cursor)
+        self._status_poll_timer.start()
 
         self.overlay = MeasureOverlay(self)
         self.overlay.setGeometry(0, 0, self.width(), self.height())
@@ -56,9 +81,45 @@ class GLViewport(QOpenGLWidget):
             return
         wx, wy = self.cam.screen_to_world(px, py)
         a = "#%02x%02x%02x" % style.ACCENT
+        # The numeric values need their own explicit color: QStatusBar's
+        # stylesheet rule (color: muted -- a dim gray, chosen for the
+        # filename/static labels elsewhere in the strip) would otherwise be
+        # the only color applied to this rich-text label, since only the
+        # "x"/"y" letters get an inline color here. On a real monitor that
+        # dim gray on the near-black canvas background is barely legible at
+        # 11px -- reported as "the x/y letters are there but the numbers
+        # aren't". Ink is the same bright color used for primary body text.
+        ink = "#%02x%02x%02x" % style.INK
         self.status_sink(
-            f'<span style="color:{a}">x</span> {wx:,.1f}'
-            f'&nbsp;&nbsp;&nbsp;<span style="color:{a}">y</span> {wy:,.1f}')
+            f'<span style="color:{a}">x</span> <span style="color:{ink}">{wx:,.1f}</span>'
+            f'&nbsp;&nbsp;&nbsp;<span style="color:{a}">y</span> <span style="color:{ink}">{wy:,.1f}</span>')
+
+    def emit_status_at_cursor(self):
+        """Populate the status bar from the cursor's current position, without
+        waiting for a mouseMoveEvent. A move event only fires once the OS
+        cursor actually crosses into the widget -- there is no Qt event for
+        "this widget's content/visibility changed while the cursor was
+        already sitting on top of it and never physically moved", which is
+        the actual gap: opening a file, switching tabs, or a window being
+        resized while the cursor happens to already be positioned over the
+        canvas all leave the status bar blank indefinitely otherwise. Calling
+        this from a few specific triggers (tab change, resize) narrows the
+        window but doesn't close it (confirmed: a resize-then-cursor-move-
+        with-no-further-trigger sequence still went unnoticed) -- see the
+        periodic timer in __init__ for the actual fix; this method is also
+        called directly at those trigger points for a faster response when
+        they do line up."""
+        # Background tabs share the active tab's geometry inside the QTabWidget,
+        # so their rect() still "contains" the cursor -- without this guard an
+        # inactive tab's poll timer would keep writing its own camera's coords
+        # to the shared status label, and the coordinates would revert to
+        # whichever tab won the race (usually the first one).
+        if not self.isVisible():
+            return
+        from PySide6.QtGui import QCursor
+        local = self.mapFromGlobal(QCursor.pos())
+        if self.rect().contains(local):
+            self._emit_status(local.x(), local.y())
 
     # -- GL lifecycle -----------------------------------------------------
     def initializeGL(self):
@@ -74,6 +135,13 @@ class GLViewport(QOpenGLWidget):
         # an early, smaller layout size.
         if self.scene is not None and not self._user_view:
             self.cam.fit(self._layout.bbox())
+        # Belt-and-suspenders for emit_status_at_cursor: the very first time a
+        # window appears, its on-screen geometry may not be final yet at the
+        # point _tab_changed's deferred call runs, so a stationary cursor
+        # could be (wrongly) judged as outside the widget. resizeGL fires
+        # again once layout truly settles, so retry here too -- harmless if
+        # the first attempt already got it right.
+        self.emit_status_at_cursor()
 
     def paintGL(self):
         fbo = self.ctx.detect_framebuffer()
@@ -110,6 +178,20 @@ class GLViewport(QOpenGLWidget):
             pt = (sx, y0) if abs(sx - x0) >= abs(sy - y0) else (x0, sy)
         return pt, kind
 
+    def _apply_pending_measure_move(self):
+        """Run the throttled snap query for the latest pending cursor position."""
+        if self._pending_measure_move is None:
+            return
+        px, py, shift = self._pending_measure_move
+        self._pending_measure_move = None
+        self.measure_cursor, self.snap_kind = self._measure_point(px, py, shift)
+        self.overlay.update()
+
+    def _on_measure_move_timeout(self):
+        if self._pending_measure_move is not None:
+            self._apply_pending_measure_move()
+            self._measure_move_timer.start()    # keep throttling while moves keep coming
+
     # -- interaction ------------------------------------------------------
     def wheelEvent(self, e):
         steps = e.angleDelta().y() / 120.0
@@ -140,10 +222,14 @@ class GLViewport(QOpenGLWidget):
         p = e.position()
         self._emit_status(p.x(), p.y())
         if self.measure_mode:
-            # Live snap / ortho-constraint indicator under the cursor.
+            # Live snap / ortho-constraint indicator under the cursor. Throttled
+            # (see _MEASURE_THROTTLE_MS) since the snap query is too expensive to
+            # redo synchronously on every raw move event without falling behind.
             shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            self.measure_cursor, self.snap_kind = self._measure_point(p.x(), p.y(), shift)
-            self.overlay.update()
+            self._pending_measure_move = (p.x(), p.y(), shift)
+            if not self._measure_move_timer.isActive():
+                self._apply_pending_measure_move()      # immediate for the first event
+                self._measure_move_timer.start()        # then hold off briefly
             return
         if self._last is not None:
             self.cam.pan_pixels(p.x() - self._last[0], p.y() - self._last[1])
@@ -162,7 +248,12 @@ class GLViewport(QOpenGLWidget):
             self.snap = Snapper(self._layout)
         if not on:
             self.snap_kind = None
-        self.setMouseTracking(self.measure_mode)
+            self._pending_measure_move = None
+            self._measure_move_timer.stop()
+        # NOTE: mouse tracking is left permanently on (set once in __init__) for the
+        # always-live status-bar x/y -- it must not be tied to measure_mode here, or
+        # turning measure mode off again disables hover-move events (and therefore
+        # the status bar) for the rest of the session.
         self.setCursor(Qt.CursorShape.CrossCursor if on else Qt.CursorShape.ArrowCursor)
         self.overlay.update()
 
@@ -192,4 +283,32 @@ class GLViewport(QOpenGLWidget):
     def reset_view(self):
         self._user_view = False        # resume auto-fit (until the next pan/zoom)
         self.cam.fit(self._layout.bbox())
+        self._refresh()
+
+    def reload_layout(self, layout):
+        """Swap in a freshly-parsed layout (same file, changed on disk): rebuild
+        the GPU scene from scratch, carrying over the current view and display
+        state. The old scene's GL objects are released first so repeated reloads
+        don't leak. The caller keeps the *new* layout alive and closes the old
+        one only after this returns (the scene aliases the layout's arrays)."""
+        self._layout = layout
+        self.snap = None                # rebuilt lazily against the new geometry
+        self.clear_measure()            # old measurement refers to the old geometry
+        if self.ctx is None:
+            return                      # GL not initialized yet; initializeGL will build it
+        old = self.scene
+        self.makeCurrent()
+        try:
+            scene = GLScene(self.ctx, layout)
+            if old is not None:         # carry over view-independent display state
+                scene.show_fill = old.show_fill
+                scene.show_grid = old.show_grid
+            scene.set_shade(0.55 if self._light else 1.0)
+            if old is not None:
+                old.release()
+            self.scene = scene
+        finally:
+            self.doneCurrent()
+        if not self._user_view:         # keep the user's pan/zoom; refit only if untouched
+            self.cam.fit(self._layout.bbox())
         self._refresh()

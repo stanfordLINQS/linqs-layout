@@ -15,6 +15,7 @@ from .viewport import GLViewport
 
 _VIS_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _LID_ROLE = int(Qt.ItemDataRole.UserRole)
+_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 2   # raw layer name (for reload matching)
 
 
 def _swatch(color: QColor, filled: bool) -> QIcon:
@@ -51,23 +52,18 @@ class LayerPanel(QWidget):
         hf.setBold(True)
         hf.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 3)
         title.setFont(hf)
-        count = QLabel(str(layout.n_layers))
-        count.setStyleSheet("color: rgb(%d,%d,%d);" % style.MUTED)
+        self._count = QLabel(str(layout.n_layers))
+        self._count.setStyleSheet("color: rgb(%d,%d,%d);" % style.MUTED)
         head.addWidget(title)
         head.addStretch(1)
-        head.addWidget(count)
+        head.addWidget(self._count)
         root.addLayout(head)
         root.addWidget(self._rule())
 
         self.list = QListWidget()
         self.list.itemClicked.connect(self._on_click)
         root.addWidget(self.list, 1)
-        for s in layout.layer_summary():
-            item = QListWidgetItem(f"{s.name.upper()}   {s.n_total:,}")
-            item.setData(_LID_ROLE, s.layer_id)
-            item.setData(_VIS_ROLE, True)
-            self.list.addItem(item)
-            self._restyle(item)
+        self._populate(layout)
 
         allnone = QHBoxLayout()
         allnone.setSpacing(4)
@@ -95,6 +91,39 @@ class LayerPanel(QWidget):
         self.bg_btn.toggled.connect(viewport.set_background)
         for b in (self.fill_btn, self.grid_btn, self.measure_btn, self.bg_btn):
             root.addWidget(b)
+
+    def _populate(self, layout, visible_by_name=None):
+        """(Re)fill the layer rows from ``layout``. ``visible_by_name`` restores
+        per-layer visibility across a reload (layers not in the map default on)."""
+        self.list.clear()
+        for s in layout.layer_summary():
+            vis = True if visible_by_name is None else visible_by_name.get(s.name, True)
+            item = QListWidgetItem(f"{s.name.upper()}   {s.n_total:,}")
+            item.setData(_LID_ROLE, s.layer_id)
+            item.setData(_NAME_ROLE, s.name)
+            item.setData(_VIS_ROLE, vis)
+            self.list.addItem(item)
+            self._restyle(item)
+
+    def reload_layout(self, layout):
+        """Rebuild the layer rows for a reloaded file, preserving which layers the
+        user had hidden (matched by name), and push that visibility to the new
+        scene. Call after the viewport has swapped in the new scene."""
+        visible_by_name = {
+            self.list.item(i).data(_NAME_ROLE): bool(self.list.item(i).data(_VIS_ROLE))
+            for i in range(self.list.count())
+        }
+        cols = layer_colors(max(layout.n_layers, 1))
+        self._qcolors = [QColor(int(r * 255), int(g * 255), int(b * 255))
+                         for r, g, b in cols]
+        self._count.setText(str(layout.n_layers))
+        self._populate(layout, visible_by_name)
+        scene = self._vp.scene
+        if scene is not None:
+            for i in range(self.list.count()):
+                item = self.list.item(i)
+                scene.set_layer_visible(item.data(_LID_ROLE), bool(item.data(_VIS_ROLE)))
+            self._vp.update()
 
     def _rule(self) -> QFrame:
         f = QFrame()

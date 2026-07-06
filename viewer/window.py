@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QFileSystemWatcher, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QMainWindow,
-                               QSplitter, QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel,
+                               QMainWindow, QProgressBar, QSplitter, QTabWidget,
+                               QVBoxLayout, QWidget)
+
+from pydxf import DxfLayout
 
 from . import style
 from .overlay import _mono
@@ -16,8 +19,80 @@ from .panel import LayerPanel
 from .viewport import GLViewport
 
 
+class _ParseThread(QThread):
+    """Reparse a DXF off the UI thread. The C parse (ctypes) releases the GIL, so
+    the window stays responsive -- no beach ball -- while a large file loads.
+    Emits the new DxfLayout, or None if the parse failed (e.g. a half-written
+    file)."""
+
+    done = Signal(object)
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self._path = path
+
+    def run(self):
+        try:
+            layout = DxfLayout(self._path)
+        except Exception:                 # noqa: BLE001 - partial/locked file -> keep current
+            layout = None
+        self.done.emit(layout)
+
+
+class LoadingWindow(QWidget):
+    """Small centered card shown while a DXF is parsed on a background thread
+    (large files / slow network drives), so the app gives immediate feedback
+    instead of a frozen dock icon while the file loads."""
+
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("loading")
+        self.setFixedWidth(400)
+        self.setStyleSheet(
+            "QWidget#loading { background: rgb(%d,%d,%d); border: 1px solid rgb(%d,%d,%d); }"
+            % (style.CANVAS + style.HAIR))
+        v = QVBoxLayout(self)
+        v.setContentsMargins(28, 24, 28, 24)
+        v.setSpacing(16)
+        self._label = QLabel("Opening…")
+        self._label.setFont(_mono(13))
+        self._label.setStyleSheet("color: rgb(%d,%d,%d); border: none;" % style.INK)
+        bar = QProgressBar()
+        bar.setRange(0, 0)                      # indeterminate: a busy indicator
+        bar.setTextVisible(False)
+        bar.setFixedHeight(6)
+        bar.setStyleSheet(
+            "QProgressBar { background: rgb(%d,%d,%d); border: none; }"
+            "QProgressBar::chunk { background: rgb(%d,%d,%d); }" % (style.HAIR + style.ACCENT))
+        v.addWidget(self._label)
+        v.addWidget(bar)
+
+    def set_name(self, name: str):
+        self._label.setText(f"Opening  {name} …")
+
+    def center(self):
+        scr = self.screen() or QApplication.primaryScreen()
+        if scr is not None:
+            g = scr.availableGeometry()
+            self.adjustSize()
+            self.move(g.center().x() - self.width() // 2,
+                      g.center().y() - self.height() // 2)
+
+
 class LayoutView(QWidget):
-    """One open layout (a single tab): GL viewport + layer panel."""
+    """One open layout (a single tab): GL viewport + layer panel.
+
+    Watches the DXF on disk and reparses it when an external program (e.g. a
+    layout script) rewrites the file, so the view always reflects what's on
+    disk. Reloads are debounced and gated on the file's size+mtime holding
+    steady, so a program that writes the file incrementally (row by row) is
+    reparsed once it settles rather than on every partial write."""
+
+    # Wait this long after the last change event before reparsing. Every change
+    # event restarts the clock, and we only reload once the file's stat is
+    # stable across a full interval -- so a still-writing file is never parsed
+    # mid-write, however fast the writes arrive.
+    _RELOAD_DEBOUNCE_MS = 400
 
     def __init__(self, layout):
         super().__init__()
@@ -39,6 +114,93 @@ class LayoutView(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(splitter)
+
+        # --- auto-reload on external file change ---------------------------
+        self._reload_timer = QTimer(self)
+        self._reload_timer.setSingleShot(True)
+        self._reload_timer.setInterval(self._RELOAD_DEBOUNCE_MS)
+        self._reload_timer.timeout.connect(self._maybe_reload)
+        self._loaded_sig = self._file_sig()       # stat of what's on screen
+        self._pending_sig = self._loaded_sig      # last stat seen while settling
+        self._parse = None                        # in-flight background parse thread
+        self._reloading = False
+        self._reload_again = False                # file changed again mid-parse
+        self._reload_sig = None                   # stat of the file being parsed
+        self._watcher = QFileSystemWatcher(self)
+        self._arm_watch()
+        self._watcher.fileChanged.connect(self._on_fs_change)
+        self._watcher.directoryChanged.connect(self._on_fs_change)
+
+    # -- file watching ----------------------------------------------------
+    def _file_sig(self):
+        """(size, mtime_ns) of the file, or None if it's momentarily gone."""
+        try:
+            st = os.stat(self.layout_obj.path)
+        except OSError:
+            return None
+        return (st.st_size, st.st_mtime_ns)
+
+    def _arm_watch(self):
+        """Watch the file and its directory. A truncate-in-place keeps the file
+        watch live; an atomic rename (write-temp-then-replace) drops it, so we
+        also watch the directory and re-add the file whenever it reappears."""
+        path = self.layout_obj.path
+        if os.path.exists(path) and path not in self._watcher.files():
+            self._watcher.addPath(path)
+        d = os.path.dirname(path) or "."
+        if os.path.isdir(d) and d not in self._watcher.directories():
+            self._watcher.addPath(d)
+
+    def _on_fs_change(self, *_):
+        self._arm_watch()                 # re-arm (rename replaces the inode)
+        self._reload_timer.start()        # debounce: coalesce a burst of writes
+
+    def _maybe_reload(self):
+        self._arm_watch()
+        sig = self._file_sig()
+        if sig is None:                   # gone mid-rename; a later event retriggers
+            return
+        if sig != self._pending_sig:      # still changing -> wait for it to settle
+            self._pending_sig = sig
+            self._reload_timer.start()
+            return
+        if sig == self._loaded_sig:       # stable and identical to what we show
+            return
+        self.reload()
+
+    def reload(self):
+        """Reparse the file on disk and rebuild the view in place, preserving the
+        camera, layer visibility, and display toggles. The parse runs on a
+        background thread (with a "Reloading…" indicator) so the window never
+        freezes / beach-balls while a large file loads; the GPU rebuild then
+        happens back on the UI thread once parsing finishes."""
+        if self._reloading:               # a parse is already running
+            self._reload_again = True     # coalesce: reparse once more when it's done
+            return
+        self._reloading = True
+        self._reload_sig = self._file_sig()
+        self.viewport.overlay.set_loading("Reloading…")
+        self._parse = _ParseThread(self.layout_obj.path, self)
+        self._parse.done.connect(self._on_parsed)
+        self._parse.finished.connect(self._parse.deleteLater)
+        self._parse.start()
+
+    def _on_parsed(self, new_layout):
+        """Back on the UI thread: swap in the freshly-parsed layout (if the parse
+        succeeded) and clear the indicator. A failed/partial read keeps the
+        current view. If the file changed again while we were parsing, go again."""
+        self._reloading = False
+        self.viewport.overlay.set_loading(None)
+        if new_layout is not None:
+            old = self.layout_obj
+            self.layout_obj = new_layout
+            self.viewport.reload_layout(new_layout)   # rebuild GPU scene (keeps camera)
+            self.panel.reload_layout(new_layout)      # rebuild rows + reapply visibility
+            old.close()                               # free old C buffers (scene aliased them)
+            self._loaded_sig = self._pending_sig = self._reload_sig
+        if self._reload_again:
+            self._reload_again = False
+            self.reload()
 
     def toggle_panel(self):
         """Show / hide the layer panel (L)."""
@@ -106,6 +268,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"LINQS Layout — {name}")
         self._status.clear()
         self._status_file.setText(name)
+        # Deferred (not called synchronously here): a brand-new tab's viewport
+        # may not have its final geometry laid out yet at this exact point, so
+        # mapping the cursor position now could use a stale/zero size. Letting
+        # this run on the next event-loop turn ensures layout has settled.
+        QTimer.singleShot(0, view.viewport.emit_status_at_cursor)
 
     def _close_tab(self, idx):
         view = self.tabs.widget(idx)
@@ -127,6 +294,10 @@ class MainWindow(QMainWindow):
         act_close.setShortcut(QKeySequence.StandardKey.Close)
         act_close.triggered.connect(lambda: self._close_tab(self.tabs.currentIndex()))
         file_menu.addAction(act_close)
+        act_reload = QAction("Reload", self)
+        act_reload.setShortcut(QKeySequence("Ctrl+R"))       # ⌘R on macOS
+        act_reload.triggered.connect(lambda: self._cur() and self._cur().reload())
+        file_menu.addAction(act_reload)
         file_menu.addSeparator()
         act_keys = QAction("Keybindings", self)
         act_keys.triggered.connect(self._show_keybindings)
@@ -166,8 +337,8 @@ class MainWindow(QMainWindow):
             ("G", "toggle grid"),
             ("B", "light / dark"),
             ("esc", "clear measurement"),
-            ("⌘O", "open file"),
-            ("⌘W", "close tab"),
+            (style.key_label("O"), "open file"),
+            (style.key_label("W"), "close tab"),
         ]
         w = max(len(k) for k, _ in rows)
         text = "\n".join(f"{k.ljust(w)}    {v}" for k, v in rows)
@@ -218,7 +389,7 @@ class WelcomeWindow(QMainWindow):
         v = QVBoxLayout(central)
         v.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        hint = QLabel("Press  ⌘O  to open a DXF file")
+        hint = QLabel(f"Press  {style.key_label('O')}  to open a DXF file")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint.setStyleSheet("color: white; font-size: 20px;")
         v.addWidget(hint)

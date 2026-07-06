@@ -4,7 +4,7 @@ clicks. Drawn with QPainter (the geometry is GL; this is just the overlay)."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QPointF
+from PySide6.QtCore import Qt, QPointF, QRectF
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -29,9 +29,32 @@ class MeasureOverlay(QWidget):
     def __init__(self, viewport):
         super().__init__(viewport)
         self._vp = viewport
+        self.loading_text = None            # non-None -> show a "Reloading…" pill
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def set_loading(self, text):
+        """Show (``text``) or hide (``None``) a top-center status pill, e.g. while
+        the layout is being reparsed on a background thread."""
+        self.loading_text = text or None
+        self.update()
+
+    def _draw_loading(self, p):
+        txt = self.loading_text
+        if not txt:
+            return
+        amber = style.qcolor(style.ACCENT)
+        p.setFont(_mono(12, True))
+        fm = p.fontMetrics()
+        w, h = fm.horizontalAdvance(txt) + 34, fm.height() + 16
+        x, y = (self.width() - w) / 2.0, 18.0
+        box = QRectF(x, y, w, h)
+        p.setPen(QPen(amber, 1.0))
+        p.setBrush(style.qcolor(style.CANVAS, 235))       # flat box, 1px amber border
+        p.drawRoundedRect(box, 6, 6)
+        p.setPen(amber)
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter, txt)
 
     def _draw_scale_bar(self, p):
         """Bottom-left scale bar: one grid cell, labeled in µm/mm (high contrast)."""
@@ -62,6 +85,7 @@ class MeasureOverlay(QWidget):
         amber = style.qcolor(style.ACCENT)
 
         self._draw_scale_bar(p)
+        self._draw_loading(p)
 
         chain = list(vp.measure_points)
         if len(chain) == 1 and vp.measure_cursor is not None:

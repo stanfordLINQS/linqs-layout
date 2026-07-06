@@ -19,7 +19,7 @@
 //   circ_layer : layer id of circle i                       (n_circles)
 //   layer_names: interned, in id order
 //
-// Build:  see build.sh
+// Build:  bash build.sh (macOS/Linux)  |  build.bat (Windows, MSVC)  |  cmake (any)
 
 #include <cstdint>
 #include <cstdio>
@@ -29,12 +29,80 @@
 #include <vector>
 #include <unordered_map>
 
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
+// Platform file-mapping shim: POSIX mmap on macOS/Linux, Win32 MapViewOfFile on
+// Windows. The parse itself works on a flat read-only byte span, so only the
+// map/unmap differs per OS.
+#ifdef _WIN32
+  #include <windows.h>
+  #define DXF_API __declspec(dllexport)   // export the C ABI from the .dll
+#else
+  #include <fcntl.h>
+  #include <sys/mman.h>
+  #include <sys/stat.h>
+  #include <unistd.h>
+  #define DXF_API
+#endif
 
 namespace {
+
+// A read-only memory map of a whole file, plus the OS handles to release it.
+struct MappedFile {
+    const char* data = nullptr;
+    size_t      size = 0;
+#ifdef _WIN32
+    HANDLE file = INVALID_HANDLE_VALUE;
+    HANDLE mapping = nullptr;
+#endif
+};
+
+// Map `path` (UTF-8) read-only into memory, hinting sequential access. Returns a
+// MappedFile with data==nullptr on any failure.
+MappedFile map_file(const char* path) {
+    MappedFile m;
+#ifdef _WIN32
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
+    if (wlen <= 0) return m;
+    std::wstring wpath((size_t)(wlen - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, &wpath[0], wlen);
+    HANDLE file = CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return m;
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(file, &sz) || sz.QuadPart == 0) { CloseHandle(file); return m; }
+    HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (!mapping) { CloseHandle(file); return m; }
+    const char* data = (const char*)MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    if (!data) { CloseHandle(mapping); CloseHandle(file); return m; }
+    m.data = data; m.size = (size_t)sz.QuadPart; m.file = file; m.mapping = mapping;
+#else
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return m;
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); return m; }
+    size_t size = (size_t)st.st_size;
+    if (size == 0) { close(fd); return m; }
+    const char* data = (const char*)mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (data == MAP_FAILED) return m;
+    madvise((void*)data, size, MADV_SEQUENTIAL);
+    m.data = data; m.size = size;
+#endif
+    return m;
+}
+
+// Release a mapping created by map_file (no-op if it failed).
+void unmap_file(MappedFile& m) {
+    if (!m.data) return;
+#ifdef _WIN32
+    UnmapViewOfFile((void*)m.data);
+    if (m.mapping) CloseHandle(m.mapping);
+    if (m.file != INVALID_HANDLE_VALUE) CloseHandle(m.file);
+#else
+    munmap((void*)m.data, m.size);
+#endif
+    m.data = nullptr;
+}
 
 // Entity classes we track in the parse state machine.
 enum Cur : uint8_t { NONE = 0, POLYLINE, VERTEX, CIRCLE, SEQEND, OTHER };
@@ -119,18 +187,11 @@ struct DxfDoc {
 
 extern "C" {
 
-DxfDoc* dxf_load(const char* path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return nullptr;
-    struct stat st;
-    if (fstat(fd, &st) != 0) { close(fd); return nullptr; }
-    size_t size = (size_t)st.st_size;
-    if (size == 0) { close(fd); return nullptr; }
-
-    const char* data = (const char*)mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (data == MAP_FAILED) return nullptr;
-    madvise((void*)data, size, MADV_SEQUENTIAL);
+DXF_API DxfDoc* dxf_load(const char* path) {
+    MappedFile mf = map_file(path);
+    if (!mf.data) return nullptr;
+    const char* data = mf.data;
+    size_t size = mf.size;
 
     DxfDoc* doc = new DxfDoc();
     // Heuristic reserves to avoid reallocations on big files.
@@ -242,23 +303,23 @@ DxfDoc* dxf_load(const char* path) {
     }
     finalize(); // flush a trailing pending entity (defensive)
 
-    munmap((void*)data, size);
+    unmap_file(mf);
     return doc;
 }
 
-void           dxf_free(DxfDoc* d)            { delete d; }
-int64_t        dxf_num_polylines(DxfDoc* d)   { return (int64_t)d->poly_start.size(); }
-int64_t        dxf_num_vertices(DxfDoc* d)    { return (int64_t)(d->verts.size() / 2); }
-int64_t        dxf_num_circles(DxfDoc* d)     { return (int64_t)d->circ_layer.size(); }
-int64_t        dxf_num_layers(DxfDoc* d)      { return (int64_t)d->layer_names.size(); }
-const double*  dxf_verts(DxfDoc* d)           { return d->verts.data(); }
-const int64_t* dxf_poly_start(DxfDoc* d)      { return d->poly_start.data(); }
-const int32_t* dxf_poly_count(DxfDoc* d)      { return d->poly_count.data(); }
-const int32_t* dxf_poly_layer(DxfDoc* d)      { return d->poly_layer.data(); }
-const uint8_t* dxf_poly_flags(DxfDoc* d)      { return d->poly_flags.data(); }
-const double*  dxf_circ(DxfDoc* d)            { return d->circ.data(); }
-const int32_t* dxf_circ_layer(DxfDoc* d)      { return d->circ_layer.data(); }
-const char*    dxf_layer_name(DxfDoc* d, int64_t i) {
+DXF_API void           dxf_free(DxfDoc* d)            { delete d; }
+DXF_API int64_t        dxf_num_polylines(DxfDoc* d)   { return (int64_t)d->poly_start.size(); }
+DXF_API int64_t        dxf_num_vertices(DxfDoc* d)    { return (int64_t)(d->verts.size() / 2); }
+DXF_API int64_t        dxf_num_circles(DxfDoc* d)     { return (int64_t)d->circ_layer.size(); }
+DXF_API int64_t        dxf_num_layers(DxfDoc* d)      { return (int64_t)d->layer_names.size(); }
+DXF_API const double*  dxf_verts(DxfDoc* d)           { return d->verts.data(); }
+DXF_API const int64_t* dxf_poly_start(DxfDoc* d)      { return d->poly_start.data(); }
+DXF_API const int32_t* dxf_poly_count(DxfDoc* d)      { return d->poly_count.data(); }
+DXF_API const int32_t* dxf_poly_layer(DxfDoc* d)      { return d->poly_layer.data(); }
+DXF_API const uint8_t* dxf_poly_flags(DxfDoc* d)      { return d->poly_flags.data(); }
+DXF_API const double*  dxf_circ(DxfDoc* d)            { return d->circ.data(); }
+DXF_API const int32_t* dxf_circ_layer(DxfDoc* d)      { return d->circ_layer.data(); }
+DXF_API const char*    dxf_layer_name(DxfDoc* d, int64_t i) {
     if (i < 0 || i >= (int64_t)d->layer_names.size()) return "";
     return d->layer_names[(size_t)i].c_str();
 }
