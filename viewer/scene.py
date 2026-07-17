@@ -288,9 +288,11 @@ class GLScene:
         self.thickness_map = None         # ThicknessMap kept for the legend / reload
 
         # Selected-polygon highlight (set by set_selection; rebuilt each pick).
-        self._sel_buf = self._sel_line_vao = self._sel_pt_vao = None
-        self._sel_n = 0
-        self._sel_closed = True
+        # Supports many polygons at once: their vertices are concatenated into one
+        # buffer, edges drawn as indexed GL_LINES, vertices as GL_POINTS.
+        self._sel_buf = self._sel_idx_buf = self._sel_line_vao = self._sel_pt_vao = None
+        self._sel_n = 0                # total vertex count (POINTS)
+        self._sel_line_count = 0       # edge-index count (GL_LINES)
 
         self._wind_tex = self._wind_fbo = None
         self._wind_size = None
@@ -322,10 +324,10 @@ class GLScene:
         if self._lut_tex is not None:
             self._lut_tex.release()
             self._lut_tex = None
-        for obj in (self._sel_line_vao, self._sel_pt_vao, self._sel_buf):
+        for obj in (self._sel_line_vao, self._sel_pt_vao, self._sel_buf, self._sel_idx_buf):
             if obj is not None:
                 obj.release()
-        self._sel_buf = self._sel_line_vao = self._sel_pt_vao = None
+        self._sel_buf = self._sel_idx_buf = self._sel_line_vao = self._sel_pt_vao = None
         for obj in self._owned:
             try:
                 obj.release()
@@ -487,23 +489,48 @@ class GLScene:
     def set_thickness_visible(self, on: bool) -> None:
         self.show_thickness = bool(on)
 
-    def set_selection(self, verts, closed: bool = True) -> None:
-        """Highlight one polygon's edges + vertices, or clear it with ``verts=None``.
-        ``verts`` is an (N, 2) world-space vertex array. Must run inside an active
-        context (it allocates a small GL buffer/VAOs, releasing the previous)."""
-        for obj in (self._sel_line_vao, self._sel_pt_vao, self._sel_buf):
+    def set_selection(self, polys) -> None:
+        """Highlight the edges + vertices of zero or more polygons.
+
+        ``polys`` is an iterable of ``(verts, closed)`` where ``verts`` is an
+        (N, 2) world-space vertex array; pass ``None`` or an empty list to clear.
+        Their vertices are concatenated into one buffer — edges drawn as indexed
+        GL_LINES (each polygon's loop wrapped independently), vertices as
+        GL_POINTS. Must run inside an active context (allocates GL buffers/VAOs,
+        releasing the previous)."""
+        for obj in (self._sel_line_vao, self._sel_pt_vao, self._sel_buf, self._sel_idx_buf):
             if obj is not None:
                 obj.release()
-        self._sel_buf = self._sel_line_vao = self._sel_pt_vao = None
+        self._sel_buf = self._sel_idx_buf = self._sel_line_vao = self._sel_pt_vao = None
         self._sel_n = 0
-        if verts is None or len(verts) == 0:
+        self._sel_line_count = 0
+        if not polys:
             return
-        v = np.ascontiguousarray(verts, np.float32)
-        self._sel_n = len(v)
-        self._sel_closed = bool(closed)
-        self._sel_buf = self.ctx.buffer(v.tobytes())
+        all_v, all_e, off = [], [], 0
+        for verts, closed in polys:
+            v = np.ascontiguousarray(verts, np.float32)
+            n = len(v)
+            if n == 0:
+                continue
+            all_v.append(v)
+            i = np.arange(n, dtype=np.uint32)
+            if closed:
+                e = np.stack([off + i, off + (i + 1) % n], axis=1)      # wrap the loop
+            else:
+                e = np.stack([off + i[:-1], off + i[1:]], axis=1)       # open strip
+            all_e.append(e)
+            off += n
+        if not all_v:
+            return
+        pos = np.concatenate(all_v, axis=0)
+        idx = np.concatenate(all_e, axis=0).reshape(-1)
+        self._sel_n = len(pos)
+        self._sel_line_count = len(idx)
+        self._sel_buf = self.ctx.buffer(pos.tobytes())
+        self._sel_idx_buf = self.ctx.buffer(idx.tobytes())
         self._sel_line_vao = self.ctx.vertex_array(
-            self.sel_line_prog, [(self._sel_buf, "2f", "in_pos")])
+            self.sel_line_prog, [(self._sel_buf, "2f", "in_pos")],
+            index_buffer=self._sel_idx_buf, index_element_size=4)
         self._sel_pt_vao = self.ctx.vertex_array(
             self.sel_pt_prog, [(self._sel_buf, "2f", "in_pos")])
 
@@ -687,9 +714,7 @@ class GLScene:
                 prog["u_offset"].value = offset
                 prog["u_color"].value = hl
             ctx.disable(moderngl.BLEND)
-            self._sel_line_vao.render(
-                moderngl.LINE_LOOP if self._sel_closed else moderngl.LINE_STRIP,
-                vertices=self._sel_n)
+            self._sel_line_vao.render(moderngl.LINES, vertices=self._sel_line_count)
             self.sel_pt_prog["u_point_size"].value = _SEL_POINT_PX
             ctx.enable(moderngl.PROGRAM_POINT_SIZE)
             self._sel_pt_vao.render(moderngl.POINTS, vertices=self._sel_n)

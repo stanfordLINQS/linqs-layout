@@ -365,6 +365,7 @@ class MainWindow(QMainWindow):
             ("scroll", "zoom at cursor"),
             ("drag", "pan"),
             ("click shape", "highlight edges / vertices"),
+            ("shift-click", "add / remove from selection"),
             ("R", "reset view"),
             ("click layer", "show / hide layer"),
             ("L", "toggle layer panel"),

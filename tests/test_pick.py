@@ -103,9 +103,14 @@ def test_selection_highlight_renders_headless():
             return int(((img[:, :, 0] > 180) & (img[:, :, 1] > 110)
                         & (img[:, :, 1] < 210) & (img[:, :, 2] < 90)).sum())
 
-        scene.set_selection(layout.verts[4:8], closed=True)   # highlight nested square
+        scene.set_selection([(layout.verts[4:8], True)])     # highlight nested square
         assert scene.has_selection()
-        assert amber_px() > 100, "selection highlight drew almost no amber"
+        one = amber_px()
+        assert one > 100, "selection highlight drew almost no amber"
+
+        # Two polygons at once (nested square + separate square) -> more amber.
+        scene.set_selection([(layout.verts[4:8], True), (layout.verts[8:12], True)])
+        assert amber_px() > one, "second selected polygon added no highlight"
 
         scene.set_selection(None)
         assert not scene.has_selection()

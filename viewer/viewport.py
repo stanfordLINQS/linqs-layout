@@ -45,6 +45,7 @@ class GLViewport(QOpenGLWidget):
         self._press = None             # left-press pixel pos (for click-vs-drag)
         self._dragged = False          # moved far enough since press to count as a pan
         self.picker = None             # built lazily on the first pick
+        self._selection: list[int] = []  # picked polygon ids (Shift adds to the set)
         self.bg = BG_DARK
         self._light = False
 
@@ -258,15 +259,19 @@ class GLViewport(QOpenGLWidget):
         # A left click that didn't pan (and isn't the measuring tool) selects the
         # polygon under the cursor and highlights its edges + vertices.
         if not self.measure_mode and not self._dragged and self._press is not None:
-            self._pick_at(*self._press)
+            additive = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self._pick_at(*self._press, additive=additive)
         self._last = None
         self._press = None
         self._dragged = False
 
     # -- selection --------------------------------------------------------
-    def _pick_at(self, px, py):
-        """Select the polygon under screen pixel (px, py) and highlight it, or
-        clear the highlight if the click missed every (visible) polygon."""
+    def _pick_at(self, px, py, additive=False):
+        """Select the polygon under screen pixel (px, py) and highlight it.
+
+        A plain click replaces the selection (clearing it on a miss); a Shift
+        click (``additive``) toggles that polygon in/out of the current set and
+        leaves the set unchanged on a miss, so several polygons can be selected."""
         if self.scene is None or self.ctx is None:
             return
         from .pick import Picker
@@ -275,18 +280,30 @@ class GLViewport(QOpenGLWidget):
         wx, wy = self.cam.screen_to_world(px, py)
         visible = self.scene.visible > 0.5
         idx = self.picker.pick(wx, wy, visible)
+        if additive:
+            if idx is None:
+                return                              # miss: keep the current set
+            if idx in self._selection:
+                self._selection.remove(idx)         # toggle off
+            else:
+                self._selection.append(idx)
+        else:
+            self._selection = [] if idx is None else [idx]
+        self._apply_selection()
+
+    def _apply_selection(self):
+        """Push the current ``_selection`` set to the GPU highlight."""
+        polys = [(self.picker.poly_verts(i), self.picker.is_closed(i))
+                 for i in self._selection]
         self.makeCurrent()
         try:
-            if idx is None:
-                self.scene.set_selection(None)
-            else:
-                self.scene.set_selection(
-                    self.picker.poly_verts(idx), closed=self.picker.is_closed(idx))
+            self.scene.set_selection(polys)
         finally:
             self.doneCurrent()
         self.update()
 
     def clear_selection(self):
+        self._selection = []
         if self.scene is not None and self.ctx is not None and self.scene.has_selection():
             self.makeCurrent()
             try:
@@ -384,6 +401,7 @@ class GLViewport(QOpenGLWidget):
         self._layout = layout
         self.snap = None                # rebuilt lazily against the new geometry
         self.picker = None              # rebuilt lazily against the new geometry
+        self._selection = []            # ids refer to old geometry; drop them
         self.clear_measure()            # old measurement refers to the old geometry
         # The new scene starts with no selection; the old one referred to old
         # geometry, so there's nothing to carry over (and nothing to clear on GPU).
