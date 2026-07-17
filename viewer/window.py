@@ -7,9 +7,9 @@ import os
 
 from PySide6.QtCore import QFileSystemWatcher, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel,
-                               QMainWindow, QProgressBar, QSplitter, QTabWidget,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QHBoxLayout,
+                               QLabel, QMainWindow, QMessageBox, QProgressBar,
+                               QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from pydxf import DxfLayout
 
@@ -323,6 +323,37 @@ class MainWindow(QMainWindow):
             act.setShortcut(QKeySequence(key))
             act.triggered.connect(on_cur(fn))
             view_menu.addAction(act)
+
+        view_menu.addSeparator()
+        act_thick = QAction("Load Thickness Map…", self)
+        act_thick.triggered.connect(self._load_thickness)
+        view_menu.addAction(act_thick)
+        act_thick_clear = QAction("Clear Thickness Map", self)
+        act_thick_clear.triggered.connect(self._clear_thickness)
+        view_menu.addAction(act_thick_clear)
+
+    def _load_thickness(self):
+        view = self._cur()
+        if view is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Thickness Map", "", "CSV / text (*.csv *.txt *.dat);;All files (*)")
+        if not path:
+            return
+        try:
+            tmap = view.viewport.load_thickness_map(path)
+        except Exception as exc:              # noqa: BLE001 - surface a readable error
+            QMessageBox.warning(self, "Thickness Map",
+                                f"Could not load thickness map:\n{exc}")
+            return
+        view.panel.on_thickness_loaded(tmap)
+
+    def _clear_thickness(self):
+        view = self._cur()
+        if view is None:
+            return
+        view.viewport.clear_thickness_map()
+        view.panel.on_thickness_cleared()
 
     def _show_keybindings(self):
         rows = [

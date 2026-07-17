@@ -29,6 +29,7 @@ import moderngl
 import numpy as np
 
 from .palette import layer_colors
+from .thickness import colormap_lut
 
 _CIRCLE_SEGMENTS = 64
 _DEFAULT_FILL_ALPHA = 0.22
@@ -141,6 +142,33 @@ void main() {
 }
 """
 
+# Thickness map: fullscreen colormap of a gridded film-thickness field. World
+# coords are reconstructed from gl_FragCoord (as in the grid pass), mapped into
+# the field's world bbox, and the normalized thickness (r) is looked up in the
+# plasma LUT. Cells outside the bbox or with no coverage (g < 0.5) are discarded.
+_FRAG_THICK = """
+#version 330
+uniform vec2 u_scale;
+uniform vec2 u_offset;
+uniform vec2 u_viewport;
+uniform vec2 u_bbmin;
+uniform vec2 u_bbmax;
+uniform float u_alpha;
+uniform sampler2D u_field;
+uniform sampler2D u_lut;
+out vec4 f_color;
+void main() {
+    vec2 clip = 2.0 * gl_FragCoord.xy / u_viewport - 1.0;
+    vec2 world = (clip - u_offset) / u_scale;
+    vec2 uv = (world - u_bbmin) / (u_bbmax - u_bbmin);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
+    vec2 s = texture(u_field, uv).rg;           // r = value[0,1], g = coverage
+    if (s.g < 0.5) discard;                      // no measured data here
+    vec3 c = texture(u_lut, vec2(clamp(s.r, 0.0, 1.0), 0.5)).rgb;
+    f_color = vec4(c, u_alpha);
+}
+"""
+
 _GRID_TARGET_PX = 78.0      # aim for ~this on-screen spacing between dots
 _GRID_DOT_PX = 1.6          # dot radius in pixels
 
@@ -175,6 +203,7 @@ class GLScene:
         self.visible = np.ones(self.n_layers, np.float32)
         self.show_fill = True
         self.show_grid = True
+        self.show_thickness = False   # only meaningful once a map is loaded
         self.grid_spacing = 1.0     # world units between grid nodes (set each draw)
         self.fill_alpha = float(fill_alpha)
         self._shade = 1.0          # color multiplier (dimmed in light-background mode)
@@ -199,6 +228,7 @@ class GLScene:
         self.wind_prog = self._own(ctx.program(vertex_shader=_VERT_WIND, fragment_shader=_FRAG_WIND))
         self.cover_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_COVER))
         self.grid_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_GRID))
+        self.thick_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_THICK))
         for prog in (self.outline_prog, self.circ_prog):
             prog["u_color"].write(self.colors.tobytes())
 
@@ -206,6 +236,16 @@ class GLScene:
         fs_buf = self._own(ctx.buffer(fs.tobytes()))
         self.cover_vao = self._own(ctx.vertex_array(self.cover_prog, [(fs_buf, "2f", "in_p")]))
         self.grid_vao = self._own(ctx.vertex_array(self.grid_prog, [(fs_buf, "2f", "in_p")]))
+        self.thick_vao = self._own(ctx.vertex_array(self.thick_prog, [(fs_buf, "2f", "in_p")]))
+
+        # Plasma LUT (256x1 RGB), sampled linearly by normalized thickness.
+        lut = colormap_lut(256)
+        self._lut_tex = self.ctx.texture((256, 1), 3, lut.tobytes(), dtype="f4")
+        self._lut_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self._lut_tex.repeat_x = self._lut_tex.repeat_y = False
+        self._thick_tex = None            # the gridded field (set by set_thickness)
+        self._thick_bbox = None
+        self.thickness_map = None         # ThicknessMap kept for the legend / reload
 
         self._wind_tex = self._wind_fbo = None
         self._wind_size = None
@@ -231,6 +271,12 @@ class GLScene:
         if self._wind_tex is not None:
             self._wind_tex.release()
             self._wind_tex = None
+        if self._thick_tex is not None:
+            self._thick_tex.release()
+            self._thick_tex = None
+        if self._lut_tex is not None:
+            self._lut_tex.release()
+            self._lut_tex = None
         for obj in self._owned:
             try:
                 obj.release()
@@ -369,6 +415,29 @@ class GLScene:
     def set_grid(self, on: bool) -> None:
         self.show_grid = bool(on)
 
+    def set_thickness(self, tmap) -> None:
+        """Upload a gridded :class:`~viewer.thickness.ThicknessMap` (or ``None`` to
+        clear) as the background colormap field. Turns the overlay on when a map
+        is set. Must run inside an active context (releases the previous field)."""
+        if self._thick_tex is not None:
+            self._thick_tex.release()
+            self._thick_tex = None
+        self.thickness_map = tmap
+        self._thick_bbox = None
+        if tmap is None:
+            self.show_thickness = False
+            return
+        gh, gw, _ = tmap.field.shape
+        tex = self.ctx.texture((gw, gh), 2, tmap.field.tobytes(), dtype="f4")
+        tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        tex.repeat_x = tex.repeat_y = False
+        self._thick_tex = tex
+        self._thick_bbox = tmap.bbox
+        self.show_thickness = True
+
+    def set_thickness_visible(self, on: bool) -> None:
+        self.show_thickness = bool(on)
+
     def set_shade(self, shade: float) -> None:
         """Multiply all layer colors by ``shade`` (used to darken for light bg)."""
         self._shade = float(shade)
@@ -435,6 +504,25 @@ class GLScene:
         W, H = main_fbo.size
         upp = 2.0 / (scale[0] * W)
         self.grid_spacing = float(grid_spacing) if grid_spacing else _nice_spacing(upp * _GRID_TARGET_PX)
+
+        # Pass -1: film-thickness colormap (behind everything, incl. the grid).
+        if self.show_thickness and self._thick_tex is not None:
+            tp = self.thick_prog
+            tp["u_scale"].value = scale
+            tp["u_offset"].value = offset
+            tp["u_viewport"].value = (float(W), float(H))
+            tp["u_bbmin"].value = (self._thick_bbox[0], self._thick_bbox[1])
+            tp["u_bbmax"].value = (self._thick_bbox[2], self._thick_bbox[3])
+            tp["u_field"].value = 0
+            tp["u_lut"].value = 1
+            tp["u_alpha"].value = 0.55 if self._shade >= 1.0 else 0.40
+            self._thick_tex.use(0)
+            self._lut_tex.use(1)
+            main_fbo.use()
+            ctx.enable(moderngl.BLEND)
+            ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+            self.thick_vao.render(moderngl.TRIANGLES, vertices=3)
+            ctx.disable(moderngl.BLEND)
 
         # Pass 0: background dot grid (behind all geometry).
         if self.show_grid:

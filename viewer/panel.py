@@ -4,14 +4,66 @@ plus the fill / grid / measure / light toggles."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QPushButton,
                                QVBoxLayout, QWidget)
 
 from . import style
 from .palette import layer_colors
+from .thickness import colormap_lut
 from .viewport import GLViewport
+
+
+class ThicknessLegend(QWidget):
+    """A horizontal plasma colorbar with min/max thickness (nm) labels. Hidden
+    until a map is loaded; ``set_range`` fills in the numbers."""
+
+    _BAR_H = 12
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lut = (colormap_lut(256) * 255).astype("uint8")   # (256,3)
+        img = QImage(256, 1, QImage.Format.Format_RGB888)
+        for i, (r, g, b) in enumerate(lut):
+            img.setPixelColor(i, 0, QColor(int(r), int(g), int(b)))
+        self._grad = QPixmap.fromImage(img)
+        self._vmin = self._vmax = None
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 2, 0, 0)
+        v.setSpacing(3)
+        cap = QLabel("THICKNESS  (nm)")
+        cf = QFont(style.MONO_FAMILY, 9)
+        cf.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 2)
+        cap.setFont(cf)
+        cap.setStyleSheet("color: rgb(%d,%d,%d);" % style.MUTED)
+        v.addWidget(cap)
+        self._bar = QLabel()
+        self._bar.setFixedHeight(self._BAR_H)
+        self._bar.setScaledContents(True)
+        v.addWidget(self._bar)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        self._lo = QLabel("")
+        self._hi = QLabel("")
+        for lab in (self._lo, self._hi):
+            lab.setFont(QFont(style.MONO_FAMILY, 9))
+            lab.setStyleSheet("color: rgb(%d,%d,%d);" % style.MUTED)
+        self._hi.setAlignment(Qt.AlignmentFlag.AlignRight)
+        row.addWidget(self._lo)
+        row.addStretch(1)
+        row.addWidget(self._hi)
+        v.addLayout(row)
+
+    def resizeEvent(self, e):
+        self._bar.setPixmap(self._grad)     # QLabel scales it to width
+        super().resizeEvent(e)
+
+    def set_range(self, vmin: float, vmax: float):
+        self._vmin, self._vmax = vmin, vmax
+        self._bar.setPixmap(self._grad)
+        self._lo.setText(f"{vmin:,.1f}")
+        self._hi.setText(f"{vmax:,.1f}")
 
 _VIS_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _LID_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -89,8 +141,32 @@ class LayerPanel(QWidget):
         self.measure_btn.toggled.connect(viewport.set_measure_mode)
         self.bg_btn = QCheckBox("light")
         self.bg_btn.toggled.connect(viewport.set_background)
-        for b in (self.fill_btn, self.grid_btn, self.measure_btn, self.bg_btn):
+        self.thick_btn = QCheckBox("thickness")
+        self.thick_btn.setEnabled(False)          # no map loaded yet
+        self.thick_btn.toggled.connect(viewport.set_thickness_visible)
+        for b in (self.fill_btn, self.grid_btn, self.measure_btn, self.bg_btn,
+                  self.thick_btn):
             root.addWidget(b)
+
+        self.legend = ThicknessLegend()
+        self.legend.hide()                        # shown once a map loads
+        root.addWidget(self.legend)
+
+    def on_thickness_loaded(self, tmap):
+        """Enable + check the thickness toggle and show the colorbar legend."""
+        self.thick_btn.setEnabled(True)
+        self.thick_btn.blockSignals(True)
+        self.thick_btn.setChecked(True)           # loading a map turns it on
+        self.thick_btn.blockSignals(False)
+        self.legend.set_range(tmap.vmin, tmap.vmax)
+        self.legend.show()
+
+    def on_thickness_cleared(self):
+        self.thick_btn.blockSignals(True)
+        self.thick_btn.setChecked(False)
+        self.thick_btn.blockSignals(False)
+        self.thick_btn.setEnabled(False)
+        self.legend.hide()
 
     def _populate(self, layout, visible_by_name=None):
         """(Re)fill the layer rows from ``layout``. ``visible_by_name`` restores

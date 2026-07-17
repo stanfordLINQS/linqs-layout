@@ -41,6 +41,8 @@ class GLViewport(QOpenGLWidget):
         self.bg = BG_DARK
         self._light = False
 
+        self._thickness = None          # loaded ThicknessMap (re-applied on reload)
+
         self.measure_mode = False
         self.measure_points: list[tuple[float, float]] = []
         self.measure_cursor = None
@@ -273,6 +275,40 @@ class GLViewport(QOpenGLWidget):
             self.scene.show_grid = bool(on)
             self.update()
 
+    def load_thickness_map(self, path: str):
+        """Load a thickness CSV and upload it as the background colormap. Returns
+        the :class:`~viewer.thickness.ThicknessMap` (for the legend). Raises on a
+        bad/empty file; the caller surfaces the error."""
+        from .thickness import load_thickness_csv
+        tmap = load_thickness_csv(path)         # CPU gridding (may raise) before touching GL
+        self._thickness = tmap
+        if self.scene is not None and self.ctx is not None:
+            self.makeCurrent()
+            try:
+                self.scene.set_thickness(tmap)
+            finally:
+                self.doneCurrent()
+            self.update()
+        return tmap
+
+    def clear_thickness_map(self):
+        self._thickness = None
+        if self.scene is not None and self.ctx is not None:
+            self.makeCurrent()
+            try:
+                self.scene.set_thickness(None)
+            finally:
+                self.doneCurrent()
+            self.update()
+
+    def set_thickness_visible(self, on: bool):
+        if self.scene is not None:
+            self.scene.set_thickness_visible(bool(on))
+            self.update()
+
+    def has_thickness_map(self) -> bool:
+        return self._thickness is not None
+
     def set_background(self, light: bool):
         self._light = bool(light)
         self.bg = BG_LIGHT if light else BG_DARK
@@ -303,6 +339,9 @@ class GLViewport(QOpenGLWidget):
             if old is not None:         # carry over view-independent display state
                 scene.show_fill = old.show_fill
                 scene.show_grid = old.show_grid
+            if self._thickness is not None:     # re-upload the field for the new scene
+                scene.set_thickness(self._thickness)
+                scene.show_thickness = old.show_thickness if old is not None else True
             scene.set_shade(0.55 if self._light else 1.0)
             if old is not None:
                 old.release()
