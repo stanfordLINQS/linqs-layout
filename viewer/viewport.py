@@ -25,6 +25,10 @@ from .snap import Snapper
 # per ~frame instead, always using the latest position.
 _MEASURE_THROTTLE_MS = 16
 
+# A left press+release that moves less than this (pixels) is treated as a click
+# (select the polygon under it) rather than a pan.
+_CLICK_SLOP_PX = 4
+
 
 class GLViewport(QOpenGLWidget):
     """QOpenGLWidget hosting a :class:`GLScene`, with pan, zoom-at-cursor, a
@@ -38,6 +42,9 @@ class GLViewport(QOpenGLWidget):
         self.ctx = None
         self._user_view = False        # True once the user has panned/zoomed
         self._last = None
+        self._press = None             # left-press pixel pos (for click-vs-drag)
+        self._dragged = False          # moved far enough since press to count as a pan
+        self.picker = None             # built lazily on the first pick
         self.bg = BG_DARK
         self._light = False
 
@@ -219,6 +226,8 @@ class GLViewport(QOpenGLWidget):
             self._refresh()
         else:
             self._last = (p.x(), p.y())
+            self._press = (p.x(), p.y())
+            self._dragged = False
 
     def mouseMoveEvent(self, e):
         p = e.position()
@@ -234,18 +243,63 @@ class GLViewport(QOpenGLWidget):
                 self._measure_move_timer.start()        # then hold off briefly
             return
         if self._last is not None:
+            if self._press is not None and (
+                    abs(p.x() - self._press[0]) > _CLICK_SLOP_PX
+                    or abs(p.y() - self._press[1]) > _CLICK_SLOP_PX):
+                self._dragged = True         # a real pan, not a click
             self.cam.pan_pixels(p.x() - self._last[0], p.y() - self._last[1])
             self._last = (p.x(), p.y())
             self._user_view = True
             self._refresh()
 
     def mouseReleaseEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            self._last = None
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        # A left click that didn't pan (and isn't the measuring tool) selects the
+        # polygon under the cursor and highlights its edges + vertices.
+        if not self.measure_mode and not self._dragged and self._press is not None:
+            self._pick_at(*self._press)
+        self._last = None
+        self._press = None
+        self._dragged = False
+
+    # -- selection --------------------------------------------------------
+    def _pick_at(self, px, py):
+        """Select the polygon under screen pixel (px, py) and highlight it, or
+        clear the highlight if the click missed every (visible) polygon."""
+        if self.scene is None or self.ctx is None:
+            return
+        from .pick import Picker
+        if self.picker is None:
+            self.picker = Picker(self._layout)
+        wx, wy = self.cam.screen_to_world(px, py)
+        visible = self.scene.visible > 0.5
+        idx = self.picker.pick(wx, wy, visible)
+        self.makeCurrent()
+        try:
+            if idx is None:
+                self.scene.set_selection(None)
+            else:
+                self.scene.set_selection(
+                    self.picker.poly_verts(idx), closed=self.picker.is_closed(idx))
+        finally:
+            self.doneCurrent()
+        self.update()
+
+    def clear_selection(self):
+        if self.scene is not None and self.ctx is not None and self.scene.has_selection():
+            self.makeCurrent()
+            try:
+                self.scene.set_selection(None)
+            finally:
+                self.doneCurrent()
+            self.update()
 
     # -- API for the panel / shortcuts -----------------------------------
     def set_measure_mode(self, on: bool):
         self.measure_mode = bool(on)
+        if on:
+            self.clear_selection()            # highlight is only shown outside measure mode
         if on and self.snap is None:          # build the snapper up front, once
             self.snap = Snapper(self._layout)
         if not on:
@@ -329,7 +383,10 @@ class GLViewport(QOpenGLWidget):
         one only after this returns (the scene aliases the layout's arrays)."""
         self._layout = layout
         self.snap = None                # rebuilt lazily against the new geometry
+        self.picker = None              # rebuilt lazily against the new geometry
         self.clear_measure()            # old measurement refers to the old geometry
+        # The new scene starts with no selection; the old one referred to old
+        # geometry, so there's nothing to carry over (and nothing to clear on GPU).
         if self.ctx is None:
             return                      # GL not initialized yet; initializeGL will build it
         old = self.scene

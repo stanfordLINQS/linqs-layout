@@ -169,6 +169,44 @@ void main() {
 }
 """
 
+# Selection highlight: the picked polygon's edges (LINE_LOOP) and vertices
+# (round GL_POINTS) drawn on top of everything in the amber accent. One vertex
+# shader serves both draws; it also writes gl_PointSize (ignored by the line
+# draw). Colors are chosen per background so the highlight stays vivid in both.
+_VERT_SEL = """
+#version 330
+uniform vec2 u_scale;
+uniform vec2 u_offset;
+uniform float u_point_size;
+in vec2 in_pos;
+void main() {
+    gl_Position = vec4(in_pos * u_scale + u_offset, 0.0, 1.0);
+    gl_PointSize = u_point_size;
+}
+"""
+
+_FRAG_SEL_LINE = """
+#version 330
+uniform vec3 u_color;
+out vec4 f_color;
+void main() { f_color = vec4(u_color, 1.0); }
+"""
+
+_FRAG_SEL_PT = """
+#version 330
+uniform vec3 u_color;
+out vec4 f_color;
+void main() {
+    vec2 d = gl_PointCoord - vec2(0.5);
+    if (dot(d, d) > 0.25) discard;      // clip the square point sprite to a disc
+    f_color = vec4(u_color, 1.0);
+}
+"""
+
+_SEL_COLOR_DARK = (1.0, 0.69, 0.0)      # amber accent (255,176,0) on the dark canvas
+_SEL_COLOR_LIGHT = (0.80, 0.33, 0.0)    # deeper amber so it reads on the light canvas
+_SEL_POINT_PX = 8.0                     # vertex marker diameter, pixels
+
 _GRID_TARGET_PX = 78.0      # aim for ~this on-screen spacing between dots
 _GRID_DOT_PX = 1.6          # dot radius in pixels
 
@@ -229,6 +267,8 @@ class GLScene:
         self.cover_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_COVER))
         self.grid_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_GRID))
         self.thick_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_THICK))
+        self.sel_line_prog = self._own(ctx.program(vertex_shader=_VERT_SEL, fragment_shader=_FRAG_SEL_LINE))
+        self.sel_pt_prog = self._own(ctx.program(vertex_shader=_VERT_SEL, fragment_shader=_FRAG_SEL_PT))
         for prog in (self.outline_prog, self.circ_prog):
             prog["u_color"].write(self.colors.tobytes())
 
@@ -246,6 +286,11 @@ class GLScene:
         self._thick_tex = None            # the gridded field (set by set_thickness)
         self._thick_bbox = None
         self.thickness_map = None         # ThicknessMap kept for the legend / reload
+
+        # Selected-polygon highlight (set by set_selection; rebuilt each pick).
+        self._sel_buf = self._sel_line_vao = self._sel_pt_vao = None
+        self._sel_n = 0
+        self._sel_closed = True
 
         self._wind_tex = self._wind_fbo = None
         self._wind_size = None
@@ -277,6 +322,10 @@ class GLScene:
         if self._lut_tex is not None:
             self._lut_tex.release()
             self._lut_tex = None
+        for obj in (self._sel_line_vao, self._sel_pt_vao, self._sel_buf):
+            if obj is not None:
+                obj.release()
+        self._sel_buf = self._sel_line_vao = self._sel_pt_vao = None
         for obj in self._owned:
             try:
                 obj.release()
@@ -437,6 +486,29 @@ class GLScene:
 
     def set_thickness_visible(self, on: bool) -> None:
         self.show_thickness = bool(on)
+
+    def set_selection(self, verts, closed: bool = True) -> None:
+        """Highlight one polygon's edges + vertices, or clear it with ``verts=None``.
+        ``verts`` is an (N, 2) world-space vertex array. Must run inside an active
+        context (it allocates a small GL buffer/VAOs, releasing the previous)."""
+        for obj in (self._sel_line_vao, self._sel_pt_vao, self._sel_buf):
+            if obj is not None:
+                obj.release()
+        self._sel_buf = self._sel_line_vao = self._sel_pt_vao = None
+        self._sel_n = 0
+        if verts is None or len(verts) == 0:
+            return
+        v = np.ascontiguousarray(verts, np.float32)
+        self._sel_n = len(v)
+        self._sel_closed = bool(closed)
+        self._sel_buf = self.ctx.buffer(v.tobytes())
+        self._sel_line_vao = self.ctx.vertex_array(
+            self.sel_line_prog, [(self._sel_buf, "2f", "in_pos")])
+        self._sel_pt_vao = self.ctx.vertex_array(
+            self.sel_pt_prog, [(self._sel_buf, "2f", "in_pos")])
+
+    def has_selection(self) -> bool:
+        return self._sel_line_vao is not None
 
     def set_shade(self, shade: float) -> None:
         """Multiply all layer colors by ``shade`` (used to darken for light bg)."""
@@ -606,3 +678,19 @@ class GLScene:
             self.circ_prog["u_alpha"].value = 1.0
             self.circ_loop_vao.render(
                 moderngl.LINE_LOOP, vertices=_CIRCLE_SEGMENTS, instances=self.n_circ)
+
+        # Pass 3: selected-polygon highlight (amber edges + vertex dots) on top.
+        if self._sel_line_vao is not None and self._sel_n > 0:
+            hl = _SEL_COLOR_DARK if self._shade >= 1.0 else _SEL_COLOR_LIGHT
+            for prog in (self.sel_line_prog, self.sel_pt_prog):
+                prog["u_scale"].value = scale
+                prog["u_offset"].value = offset
+                prog["u_color"].value = hl
+            ctx.disable(moderngl.BLEND)
+            self._sel_line_vao.render(
+                moderngl.LINE_LOOP if self._sel_closed else moderngl.LINE_STRIP,
+                vertices=self._sel_n)
+            self.sel_pt_prog["u_point_size"].value = _SEL_POINT_PX
+            ctx.enable(moderngl.PROGRAM_POINT_SIZE)
+            self._sel_pt_vao.render(moderngl.POINTS, vertices=self._sel_n)
+            ctx.disable(moderngl.PROGRAM_POINT_SIZE)

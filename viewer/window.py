@@ -242,8 +242,13 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._status_file)
 
         self._build_menu()
-        QShortcut(QKeySequence("Esc"), self,
-                  lambda: self._cur() and self._cur().viewport.clear_measure())
+        QShortcut(QKeySequence("Esc"), self, self._on_escape)
+
+    def _on_escape(self):
+        view = self._cur()
+        if view is not None:
+            view.viewport.clear_measure()
+            view.viewport.clear_selection()
 
     # -- tabs -------------------------------------------------------------
     def add_layout(self, layout) -> LayoutView:
@@ -359,6 +364,7 @@ class MainWindow(QMainWindow):
         rows = [
             ("scroll", "zoom at cursor"),
             ("drag", "pan"),
+            ("click shape", "highlight edges / vertices"),
             ("R", "reset view"),
             ("click layer", "show / hide layer"),
             ("L", "toggle layer panel"),
@@ -367,7 +373,7 @@ class MainWindow(QMainWindow):
             ("F", "toggle fill"),
             ("G", "toggle grid"),
             ("B", "light / dark"),
-            ("esc", "clear measurement"),
+            ("esc", "clear measurement / selection"),
             (style.key_label("O"), "open file"),
             (style.key_label("W"), "close tab"),
         ]
