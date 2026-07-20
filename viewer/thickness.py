@@ -53,11 +53,14 @@ def colormap_lut(n: int = 256) -> np.ndarray:
 class ThicknessMap:
     """A gridded thickness field ready for GPU upload.
 
-    ``field`` is (H, W, 2) float32: channel 0 = thickness normalized to [0, 1]
-    (against ``vmin``/``vmax``), channel 1 = coverage (1 valid, 0 invalid). Row 0
+    ``field`` is (H, W, 2) float32: channel 0 = raw thickness in nm, channel 1 =
+    coverage (1 valid, 0 invalid). The colormap normalization (``value ->
+    [0,1]``) happens in the shader against adjustable ``u_vmin``/``u_vmax``
+    uniforms, so the legend range can be retuned without re-gridding. Row 0
     is ``ymin`` so texture v maps world-y directly (no flip). ``bbox`` is
-    ``(xmin, ymin, xmax, ymax)`` in world units; ``vmin``/``vmax`` are the raw
-    thickness range in nm (for the legend). ``n_points`` is the source point count.
+    ``(xmin, ymin, xmax, ymax)`` in world units; ``vmin``/``vmax`` are the data's
+    raw thickness range in nm (the default legend range). ``n_points`` is the
+    source point count.
     """
 
     field: np.ndarray
@@ -133,7 +136,6 @@ def load_thickness_csv(path: str) -> ThicknessMap:
     GX, GY = np.meshgrid(gx, gy)               # (gh, gw)
 
     vmin, vmax = float(vals.min()), float(vals.max())
-    span = vmax - vmin if vmax > vmin else 1.0
 
     # Coverage radius: mark a cell valid only if a measured point is within this
     # distance, so a non-rectangular / sparse map doesn't smear to the bbox edges.
@@ -146,7 +148,7 @@ def load_thickness_csv(path: str) -> ThicknessMap:
         d2 = (GX[j][:, None] - px[None, :]) ** 2 + (GY[j][:, None] - py[None, :]) ** 2
         wt = 1.0 / (d2 + eps) ** (_IDW_POWER / 2.0)
         val = (wt * vals[None, :]).sum(1) / wt.sum(1)
-        field[j, :, 0] = np.clip((val - vmin) / span, 0.0, 1.0)
+        field[j, :, 0] = val                       # raw nm; normalized in-shader
         field[j, :, 1] = (np.sqrt(d2.min(1)) <= cover_r).astype(np.float32)
 
     return ThicknessMap(field=field, bbox=(float(xmin), float(ymin), float(xmax),

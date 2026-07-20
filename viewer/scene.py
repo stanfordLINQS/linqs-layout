@@ -154,6 +154,8 @@ uniform vec2 u_viewport;
 uniform vec2 u_bbmin;
 uniform vec2 u_bbmax;
 uniform float u_alpha;
+uniform float u_vmin;
+uniform float u_vmax;
 uniform sampler2D u_field;
 uniform sampler2D u_lut;
 out vec4 f_color;
@@ -162,9 +164,10 @@ void main() {
     vec2 world = (clip - u_offset) / u_scale;
     vec2 uv = (world - u_bbmin) / (u_bbmax - u_bbmin);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
-    vec2 s = texture(u_field, uv).rg;           // r = value[0,1], g = coverage
+    vec2 s = texture(u_field, uv).rg;           // r = raw nm, g = coverage
     if (s.g < 0.5) discard;                      // no measured data here
-    vec3 c = texture(u_lut, vec2(clamp(s.r, 0.0, 1.0), 0.5)).rgb;
+    float t = (s.r - u_vmin) / max(u_vmax - u_vmin, 1e-9);
+    vec3 c = texture(u_lut, vec2(clamp(t, 0.0, 1.0), 0.5)).rgb;
     f_color = vec4(c, u_alpha);
 }
 """
@@ -285,6 +288,8 @@ class GLScene:
         self._lut_tex.repeat_x = self._lut_tex.repeat_y = False
         self._thick_tex = None            # the gridded field (set by set_thickness)
         self._thick_bbox = None
+        self._thick_vmin = 0.0            # colormap range (nm); retunable in-shader
+        self._thick_vmax = 1.0
         self.thickness_map = None         # ThicknessMap kept for the legend / reload
 
         # Selected-polygon highlight (set by set_selection; rebuilt each pick).
@@ -484,7 +489,15 @@ class GLScene:
         tex.repeat_x = tex.repeat_y = False
         self._thick_tex = tex
         self._thick_bbox = tmap.bbox
+        self._thick_vmin = float(tmap.vmin)
+        self._thick_vmax = float(tmap.vmax)
         self.show_thickness = True
+
+    def set_thickness_range(self, vmin: float, vmax: float) -> None:
+        """Retune the colormap's low/high thickness (nm). Pure uniform state — the
+        raw field texture is untouched, so this is instant."""
+        self._thick_vmin = float(vmin)
+        self._thick_vmax = float(vmax)
 
     def set_thickness_visible(self, on: bool) -> None:
         self.show_thickness = bool(on)
@@ -614,6 +627,8 @@ class GLScene:
             tp["u_bbmax"].value = (self._thick_bbox[2], self._thick_bbox[3])
             tp["u_field"].value = 0
             tp["u_lut"].value = 1
+            tp["u_vmin"].value = self._thick_vmin
+            tp["u_vmax"].value = self._thick_vmax
             tp["u_alpha"].value = 0.55 if self._shade >= 1.0 else 0.40
             self._thick_tex.use(0)
             self._lut_tex.use(1)

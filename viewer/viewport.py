@@ -377,6 +377,11 @@ class GLViewport(QOpenGLWidget):
             self.scene.set_thickness_visible(bool(on))
             self.update()
 
+    def set_thickness_range(self, vmin: float, vmax: float):
+        if self.scene is not None:
+            self.scene.set_thickness_range(vmin, vmax)
+            self.update()
+
     def has_thickness_map(self) -> bool:
         return self._thickness is not None
 

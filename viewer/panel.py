@@ -3,11 +3,12 @@ plus the fill / grid / measure / light toggles."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPixmap
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import (QColor, QDoubleValidator, QFont, QIcon, QImage,
+                           QPainter, QPixmap)
 from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel,
-                               QListWidget, QListWidgetItem, QPushButton,
-                               QVBoxLayout, QWidget)
+                               QLineEdit, QListWidget, QListWidgetItem,
+                               QPushButton, QVBoxLayout, QWidget)
 
 from . import style
 from .palette import layer_colors
@@ -16,8 +17,12 @@ from .viewport import GLViewport
 
 
 class ThicknessLegend(QWidget):
-    """A horizontal plasma colorbar with min/max thickness (nm) labels. Hidden
-    until a map is loaded; ``set_range`` fills in the numbers."""
+    """A horizontal plasma colorbar with *editable* min/max thickness (nm) fields.
+    Hidden until a map is loaded. ``on_loaded`` seeds the data range (and an
+    ``auto`` reset target); editing either field — or hitting ``auto`` — emits
+    :attr:`rangeChanged(vmin, vmax)`."""
+
+    rangeChanged = Signal(float, float)
 
     _BAR_H = 12
 
@@ -28,42 +33,82 @@ class ThicknessLegend(QWidget):
         for i, (r, g, b) in enumerate(lut):
             img.setPixelColor(i, 0, QColor(int(r), int(g), int(b)))
         self._grad = QPixmap.fromImage(img)
-        self._vmin = self._vmax = None
+        self._dmin = self._dmax = None      # the data's own range (for `auto`)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 2, 0, 0)
         v.setSpacing(3)
+
+        cap_row = QHBoxLayout()
+        cap_row.setContentsMargins(0, 0, 0, 0)
         cap = QLabel("THICKNESS  (nm)")
         cf = QFont(style.MONO_FAMILY, 9)
         cf.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 2)
         cap.setFont(cf)
         cap.setStyleSheet("color: rgb(%d,%d,%d);" % style.MUTED)
-        v.addWidget(cap)
+        self._auto = QPushButton("auto")
+        self._auto.setToolTip("Reset the colorbar range to the data min/max")
+        self._auto.clicked.connect(self._reset)
+        cap_row.addWidget(cap)
+        cap_row.addStretch(1)
+        cap_row.addWidget(self._auto)
+        v.addLayout(cap_row)
+
         self._bar = QLabel()
         self._bar.setFixedHeight(self._BAR_H)
         self._bar.setScaledContents(True)
         v.addWidget(self._bar)
+
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        self._lo = QLabel("")
-        self._hi = QLabel("")
-        for lab in (self._lo, self._hi):
-            lab.setFont(QFont(style.MONO_FAMILY, 9))
-            lab.setStyleSheet("color: rgb(%d,%d,%d);" % style.MUTED)
+        self._lo = self._field()
+        self._hi = self._field()
         self._hi.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._lo.editingFinished.connect(self._emit)
+        self._hi.editingFinished.connect(self._emit)
         row.addWidget(self._lo)
         row.addStretch(1)
         row.addWidget(self._hi)
         v.addLayout(row)
 
+    def _field(self) -> QLineEdit:
+        e = QLineEdit()
+        e.setValidator(QDoubleValidator())
+        e.setFixedWidth(66)
+        e.setFont(QFont(style.MONO_FAMILY, 9))
+        e.setStyleSheet(
+            "QLineEdit { color: rgb(%d,%d,%d); background: transparent;"
+            " border: 1px solid rgb(%d,%d,%d); padding: 1px 3px; }"
+            % (style.INK + style.HAIR))
+        return e
+
     def resizeEvent(self, e):
         self._bar.setPixmap(self._grad)     # QLabel scales it to width
         super().resizeEvent(e)
 
-    def set_range(self, vmin: float, vmax: float):
-        self._vmin, self._vmax = vmin, vmax
+    def on_loaded(self, vmin: float, vmax: float):
+        """Seed both fields (and the `auto` target) from a freshly loaded map."""
+        self._dmin, self._dmax = vmin, vmax
+        self._set_fields(vmin, vmax)
+
+    def _reset(self):
+        if self._dmin is None:
+            return
+        self._set_fields(self._dmin, self._dmax)
+        self._emit()
+
+    def _set_fields(self, vmin: float, vmax: float):
         self._bar.setPixmap(self._grad)
-        self._lo.setText(f"{vmin:,.1f}")
-        self._hi.setText(f"{vmax:,.1f}")
+        self._lo.setText(f"{vmin:.1f}")
+        self._hi.setText(f"{vmax:.1f}")
+
+    def _emit(self):
+        try:
+            lo, hi = float(self._lo.text()), float(self._hi.text())
+        except ValueError:
+            return
+        if hi <= lo:                        # keep the range non-degenerate
+            return
+        self.rangeChanged.emit(lo, hi)
 
 _VIS_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _LID_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -150,6 +195,7 @@ class LayerPanel(QWidget):
 
         self.legend = ThicknessLegend()
         self.legend.hide()                        # shown once a map loads
+        self.legend.rangeChanged.connect(viewport.set_thickness_range)
         root.addWidget(self.legend)
 
     def on_thickness_loaded(self, tmap):
@@ -158,7 +204,7 @@ class LayerPanel(QWidget):
         self.thick_btn.blockSignals(True)
         self.thick_btn.setChecked(True)           # loading a map turns it on
         self.thick_btn.blockSignals(False)
-        self.legend.set_range(tmap.vmin, tmap.vmax)
+        self.legend.on_loaded(tmap.vmin, tmap.vmax)
         self.legend.show()
 
     def on_thickness_cleared(self):
