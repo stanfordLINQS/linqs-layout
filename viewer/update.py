@@ -79,6 +79,36 @@ def _asset_url(release, suffix: str):
                  if str(a.get("name", "")).lower().endswith(suffix)), None)
 
 
+class _Cancelled(Exception):
+    """Raised inside a download when the user hits Cancel."""
+
+
+def _download(url: str, dst: str, progress=None, cancelled=None,
+              timeout: float = 30.0) -> None:
+    """Stream ``url`` to ``dst`` with a per-read socket ``timeout``.
+
+    Unlike ``urllib.request.urlretrieve`` (which passes *no* timeout, so a stalled
+    connection hangs the app forever — the "hangs on the download step" bug), each
+    socket read here is bounded by ``timeout``: a dead connection raises instead of
+    blocking. ``progress(done, total)`` is called as bytes arrive (``total`` is 0
+    if the server sends no Content-Length); ``cancelled()`` is polled so the user's
+    Cancel takes effect promptly, raising :class:`_Cancelled`."""
+    req = urllib.request.Request(url, headers={"User-Agent": "linqs-layout"})
+    with urllib.request.urlopen(req, timeout=timeout) as r, open(dst, "wb") as f:
+        total = int(r.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            if cancelled is not None and cancelled():
+                raise _Cancelled()
+            chunk = r.read(256 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+            done += len(chunk)
+            if progress is not None:
+                progress(done, total)
+
+
 def _fetch_latest():
     """Return (version, asset_url) for the newest *installable-on-this-OS* release,
     or (None, None) on a network error / when no release ships this OS's asset.
@@ -122,40 +152,45 @@ def latest_version() -> str | None:
 
 
 # -- macOS: in-place install of the .dmg --------------------------------------
-def _mac_install() -> bool:
-    """Download the latest release DMG and install the .app into /Applications."""
+def _mac_install(progress=None, cancelled=None) -> bool:
+    """Download the latest release DMG and install the .app into /Applications.
+
+    Every external step is time-bounded (streamed download with a socket timeout,
+    ``timeout=`` on each subprocess) so the updater can never hang indefinitely."""
     _ver, url = _fetch_latest()
     if not url:
         return False
     tmp = tempfile.mkdtemp()
+    mnt = None
     try:
         dmg = os.path.join(tmp, "update.dmg")
-        urllib.request.urlretrieve(url, dmg)          # public asset; follows redirects
+        _download(url, dmg, progress, cancelled)
         att = subprocess.run(
             ["hdiutil", "attach", dmg, "-nobrowse", "-noverify", "-readonly"],
-            capture_output=True, text=True)
+            capture_output=True, text=True, timeout=120)
         mnt = next((ln.split("\t")[-1].strip() for ln in att.stdout.splitlines()
                     if "/Volumes/" in ln), None)
         if not mnt:
             return False
-        try:
-            src = os.path.join(mnt, "LINQS Layout.app")
-            if not os.path.isdir(src):
-                return False
-            subprocess.run(["rm", "-rf", MAC_INSTALL_PATH])
-            subprocess.run(["ditto", src, MAC_INSTALL_PATH], check=True)
-            subprocess.run(["xattr", "-dr", "com.apple.quarantine", MAC_INSTALL_PATH])
-            return True
-        finally:
-            subprocess.run(["hdiutil", "detach", mnt], capture_output=True)
-    except Exception:
+        src = os.path.join(mnt, "LINQS Layout.app")
+        if not os.path.isdir(src):
+            return False
+        subprocess.run(["rm", "-rf", MAC_INSTALL_PATH], timeout=60)
+        subprocess.run(["ditto", src, MAC_INSTALL_PATH], check=True, timeout=300)
+        subprocess.run(["xattr", "-dr", "com.apple.quarantine", MAC_INSTALL_PATH],
+                       timeout=60)
+        return True
+    except (_Cancelled, Exception):
         return False
     finally:
+        if mnt:
+            subprocess.run(["hdiutil", "detach", mnt, "-force"],
+                           capture_output=True, timeout=60)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 # -- Windows: download the installer .exe (run after we quit) -----------------
-def _win_download() -> str | None:
+def _win_download(progress=None, cancelled=None) -> str | None:
     """Download the latest release installer to a temp file; return its path.
 
     The temp dir is intentionally NOT cleaned up here — the installer runs after
@@ -166,9 +201,9 @@ def _win_download() -> str | None:
     try:
         tmp = tempfile.mkdtemp(prefix="linqs-update-")
         dst = os.path.join(tmp, os.path.basename(url) or "LINQS-Layout-Setup.exe")
-        urllib.request.urlretrieve(url, dst)
+        _download(url, dst, progress, cancelled)
         return dst
-    except Exception:
+    except (_Cancelled, Exception):
         return None
 
 
@@ -242,14 +277,28 @@ class _CheckThread(QThread):
 
 
 class _InstallThread(QThread):
-    # macOS: "ok" on success; Windows: the installer path; "" on failure.
+    # macOS: "ok" on success; Windows: the installer path; "" on failure/cancel.
     result = Signal(str)
+    progress = Signal(int, int)     # (downloaded_bytes, total_bytes); total 0 if unknown
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def _cancelled(self) -> bool:
+        return self._cancel
+
+    def _progress(self, done: int, total: int):
+        self.progress.emit(done, total)
 
     def run(self):
         if _IS_MAC:
-            self.result.emit("ok" if _mac_install() else "")
+            self.result.emit("ok" if _mac_install(self._progress, self._cancelled) else "")
         elif _IS_WIN:
-            self.result.emit(_win_download() or "")
+            self.result.emit(_win_download(self._progress, self._cancelled) or "")
         else:
             self.result.emit("")
 
@@ -297,16 +346,38 @@ def check_for_updates(window, silent: bool = False):
 
 
 def _install(window, latest):
-    msg = "Downloading installer…" if _IS_WIN else f"Downloading LINQS Layout {latest}…"
-    dlg = QProgressDialog(msg, None, 0, 0, window)
+    msg = f"Downloading LINQS Layout {latest}…"
+    dlg = QProgressDialog(msg, "Cancel", 0, 100, window)
     dlg.setWindowModality(Qt.WindowModality.WindowModal)
     dlg.setMinimumDuration(0)
+    dlg.setAutoClose(False)
+    dlg.setAutoReset(False)
     inst = _InstallThread(window)
     window.__update_install = inst    # keep a reference alive
+    state = {"cancelled": False}
+
+    def on_progress(done_b, total_b):
+        if total_b > 0 and done_b < total_b:
+            dlg.setRange(0, total_b)
+            dlg.setValue(done_b)
+            dlg.setLabelText(f"Downloading LINQS Layout {latest}…"
+                             f"   {done_b >> 20} / {total_b >> 20} MB")
+        else:                          # download done (or size unknown): now installing
+            dlg.setRange(0, 0)         # busy spinner — the install phase has no %
+            dlg.setLabelText("Installing…" if _IS_MAC else "Preparing installer…")
+
+    def on_cancel():
+        state["cancelled"] = True
+        inst.cancel()
+
+    inst.progress.connect(on_progress)
+    dlg.canceled.connect(on_cancel)
 
     def done(result):
         dlg.close()
         if not result:
+            if state["cancelled"]:
+                return                 # user cancelled — no error dialog
             QMessageBox.warning(
                 window, "Update failed",
                 "Could not download the update. Try the releases page on GitHub.")
