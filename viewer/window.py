@@ -341,8 +341,10 @@ class MainWindow(QMainWindow):
         view = self._cur()
         if view is None:
             return
+        start_dir = os.path.dirname(view.layout_obj.path) or ""   # alongside the DXF
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Thickness Map", "", "CSV / text (*.csv *.txt *.dat);;All files (*)")
+            self, "Load Thickness Map", start_dir,
+            "CSV / text (*.csv *.txt *.dat);;All files (*)")
         if not path:
             return
         try:
