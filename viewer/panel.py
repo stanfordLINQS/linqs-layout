@@ -4,8 +4,8 @@ plus the fill / grid / measure / light toggles."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import (QColor, QDoubleValidator, QFont, QIcon, QImage,
-                           QPainter, QPixmap)
+from PySide6.QtGui import (QColor, QDoubleValidator, QFont, QIcon,
+                           QLinearGradient, QPainter, QPixmap)
 from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QPushButton, QVBoxLayout, QWidget)
@@ -14,6 +14,28 @@ from . import style
 from .palette import layer_colors
 from .thickness import colormap_lut
 from .viewport import GLViewport
+
+
+class _GradientBar(QWidget):
+    """The plasma colorbar strip, painted directly with a ``QLinearGradient``.
+
+    Drawing the gradient in ``paintEvent`` (rather than scaling a 256x1 ``QPixmap``)
+    means there is no pixmap that can come back null in a frozen/packaged build —
+    which blanked the strip while the caption + fields still showed."""
+
+    def __init__(self, height: int, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(height)
+        lut = colormap_lut(32)                       # 32 stops = smooth, cheap
+        self._stops = [(i / (len(lut) - 1),
+                        QColor(int(r * 255), int(g * 255), int(b * 255)))
+                       for i, (r, g, b) in enumerate(lut)]
+
+    def paintEvent(self, _e):
+        g = QLinearGradient(0, 0, self.width(), 0)
+        for pos, col in self._stops:
+            g.setColorAt(pos, col)
+        QPainter(self).fillRect(self.rect(), g)
 
 
 class ThicknessLegend(QWidget):
@@ -28,11 +50,6 @@ class ThicknessLegend(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        lut = (colormap_lut(256) * 255).astype("uint8")   # (256,3)
-        img = QImage(256, 1, QImage.Format.Format_RGB888)
-        for i, (r, g, b) in enumerate(lut):
-            img.setPixelColor(i, 0, QColor(int(r), int(g), int(b)))
-        self._grad = QPixmap.fromImage(img)
         self._dmin = self._dmax = None      # the data's own range (for `auto`)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 2, 0, 0)
@@ -53,9 +70,7 @@ class ThicknessLegend(QWidget):
         cap_row.addWidget(self._auto)
         v.addLayout(cap_row)
 
-        self._bar = QLabel()
-        self._bar.setFixedHeight(self._BAR_H)
-        self._bar.setScaledContents(True)
+        self._bar = _GradientBar(self._BAR_H)
         v.addWidget(self._bar)
 
         row = QHBoxLayout()
@@ -81,10 +96,6 @@ class ThicknessLegend(QWidget):
             % (style.INK + style.HAIR))
         return e
 
-    def resizeEvent(self, e):
-        self._bar.setPixmap(self._grad)     # QLabel scales it to width
-        super().resizeEvent(e)
-
     def on_loaded(self, vmin: float, vmax: float):
         """Seed both fields (and the `auto` target) from a freshly loaded map."""
         self._dmin, self._dmax = vmin, vmax
@@ -97,7 +108,6 @@ class ThicknessLegend(QWidget):
         self._emit()
 
     def _set_fields(self, vmin: float, vmax: float):
-        self._bar.setPixmap(self._grad)
         self._lo.setText(f"{vmin:.1f}")
         self._hi.setText(f"{vmax:.1f}")
 
