@@ -52,8 +52,20 @@ class Camera2D:
         self.cx -= dx * self.upp
         self.cy += dy * self.upp
 
+    def scale(self) -> tuple[float, float]:
+        """Return (sx, sy) such that clip = (world - (cx, cy)) * scale.
+
+        The transform is expressed relative to the camera center rather than as
+        ``world * scale + offset`` so the shaders never subtract two large
+        near-equal f32 values — see ``viewer.scene._TRANSFORM``.
+        """
+        return 2.0 / (self.vw * self.upp), 2.0 / (self.vh * self.upp)
+
     def scale_offset(self) -> tuple[tuple[float, float], tuple[float, float]]:
-        """Return ((sx, sy), (ox, oy)) such that clip = world * scale + offset."""
-        sx = 2.0 / (self.vw * self.upp)
-        sy = 2.0 / (self.vh * self.upp)
+        """Return ((sx, sy), (ox, oy)) such that clip = world * scale + offset.
+
+        Kept for callers that want the flat form; the renderer uses
+        :meth:`scale` + the camera center instead (better f32 conditioning).
+        """
+        sx, sy = self.scale()
         return (sx, sy), (-self.cx * sx, -self.cy * sy)

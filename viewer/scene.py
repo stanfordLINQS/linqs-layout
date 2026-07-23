@@ -10,10 +10,16 @@ Geometry is uploaded once and redrawn every frame. Three kinds of primitive:
     **per layer** so overlapping layers don't interfere. The only CPU prep is a
     vectorized fan index buffer (~70 ms single-core for 6 M vertices) — there is
     no earcut and no precompute cache.
-  * **Outline** — every polyline edge in one ``GL_LINES`` batch; every circle in
-    one instanced ``GL_LINE_LOOP``. Opaque, drawn on top.
+  * **Outline** — every polyline edge in one ``GL_LINES`` batch; circles in
+    instanced ``GL_LINE_LOOP`` batches. Opaque, drawn on top.
   * **Circle fill** — circles are convex, so their instanced triangle fan fills
     correctly with plain alpha blending (no winding needed).
+
+Circles carry no ring geometry at all: the unit ring is generated in the vertex
+shader from ``gl_VertexID``, so the segment count is a per-frame uniform picked
+from the on-screen pixel radius. Instances are batched by radius octave (they
+share that uniform) and, when zoomed in far enough for it to pay, culled to the
+view each frame — see :class:`_CircleGroup`.
 
 Each outline vertex carries a layer id; the vertex shader looks up that layer's
 color and visibility from small uniform arrays, so showing/hiding or recoloring a
@@ -25,13 +31,25 @@ offscreen renderer; only the moderngl context and target framebuffer differ.
 
 from __future__ import annotations
 
+import math
+
 import moderngl
 import numpy as np
 
 from .palette import layer_colors
 from .thickness import colormap_lut
 
-_CIRCLE_SEGMENTS = 64
+# Circle tessellation is chosen per frame from the on-screen pixel radius (see
+# draw()); these bound it. _CIRCLE_TOL_PX is the max chord sagitta in pixels —
+# below ~a quarter pixel the faceting is under the MSAA resolution.
+_CIRCLE_MIN_SEG = 8
+_CIRCLE_MAX_SEG = 256
+_CIRCLE_TOL_PX = 0.25
+# Per-frame view cull of circle instances (see _CircleGroup.visible) only pays
+# for itself on a big, heavily tessellated batch — otherwise the numpy mask
+# costs more than the vertices it saves.
+_CIRCLE_CULL_MIN = 4096
+_CIRCLE_CULL_SEG = 32
 _DEFAULT_FILL_ALPHA = 0.22
 
 # Outlines + circles: per-vertex/instance layer -> color, with a visibility cull.
@@ -43,10 +61,28 @@ out vec4 f_color;
 void main() { f_color = vec4(v_color, u_alpha); }
 """
 
+# Every position-consuming shader transforms *relative to the camera center*
+# (``u_org_hi`` + ``u_org_lo``) rather than with the algebraically equivalent
+# ``world * scale + offset``. That old form is a large-minus-large subtraction in
+# f32: at this layout's +/-7000 extent the f32 spacing is ~4.9e-4 world units, so
+# once a pixel covers less than ~1e-3 units (a viewport a couple of microns wide)
+# the surviving clip value carried a large fraction of a pixel of error and
+# vertices visibly snapped to a grid -- smooth arcs turned into unequal chords.
+# Splitting the center into an f32 ``hi`` plus the f64 remainder ``lo`` makes
+# ``(in_pos - u_org_hi)`` an exact cancellation (both operands are close, so
+# Sterbenz applies) and keeps full f32 mantissa on the small relative value.
+# Cost: one extra vector subtract per vertex; the multiply-add it replaces is
+# gone, so it is a wash.
+_TRANSFORM = """
+uniform vec2 u_scale;
+uniform vec2 u_org_hi;    // camera center, f32 part
+uniform vec2 u_org_lo;    // camera center, f64 remainder (tiny)
+vec2 to_clip(vec2 world) { return ((world - u_org_hi) - u_org_lo) * u_scale; }
+"""
+
 _VERT_OUTLINE = """
 #version 330
-uniform vec2 u_scale;
-uniform vec2 u_offset;
+TRANSFORM
 uniform vec3 u_color[MAXL];
 uniform float u_visible[MAXL];
 in vec2 in_pos;
@@ -58,38 +94,51 @@ void main() {
     if (u_visible[lid] < 0.5)
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     else
-        gl_Position = vec4(in_pos * u_scale + u_offset, 0.0, 1.0);
+        gl_Position = vec4(to_clip(in_pos), 0.0, 1.0);
 }
 """
 
+# Circles are drawn attribute-less: the unit ring is generated from gl_VertexID
+# and ``u_seg``, which draw() picks per frame from the largest circle's on-screen
+# pixel radius. A fixed segment count cannot be right at both ends -- 64 was
+# ~50 px per flat chord on a circle zoomed to fill the viewport (visibly a
+# polygon) and 64 wasted vertices on a sub-pixel dot when zoomed out.
+#   u_fan = 1: TRIANGLE_FAN, vertex 0 is the center, then u_seg+1 ring points
+#              (the last repeats the first to close the fan).
+#   u_fan = 0: LINE_LOOP over u_seg ring points.
+# The ring offset is added *after* the origin subtraction so the radius keeps
+# full f32 precision instead of being swamped by a far-from-origin center.
 _VERT_CIRCLE = """
 #version 330
-uniform vec2 u_scale;
-uniform vec2 u_offset;
+TRANSFORM
 uniform vec3 u_color[MAXL];
 uniform float u_visible[MAXL];
-in vec2 in_unit;
+uniform int u_seg;
+uniform int u_fan;
 in vec3 in_circ;          // cx, cy, r
 in float in_clayer;
 out vec3 v_color;
 void main() {
     int lid = int(in_clayer + 0.5);
     v_color = u_color[lid];
-    vec2 world = in_circ.xy + in_unit * in_circ.z;
+    vec2 unit = vec2(0.0);
+    if (gl_VertexID >= u_fan) {
+        float a = 6.2831853071795864 * float(gl_VertexID - u_fan) / float(u_seg);
+        unit = vec2(cos(a), sin(a));
+    }
     if (u_visible[lid] < 0.5)
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     else
-        gl_Position = vec4(world * u_scale + u_offset, 0.0, 1.0);
+        gl_Position = vec4(to_clip(in_circ.xy) + unit * in_circ.z * u_scale, 0.0, 1.0);
 }
 """
 
 # Winding pass: position only, output +/-1 by facing into an R32F target.
 _VERT_WIND = """
 #version 330
-uniform vec2 u_scale;
-uniform vec2 u_offset;
+TRANSFORM
 in vec2 in_pos;
-void main() { gl_Position = vec4(in_pos * u_scale + u_offset, 0.0, 1.0); }
+void main() { gl_Position = vec4(to_clip(in_pos), 0.0, 1.0); }
 """
 
 _FRAG_WIND = """
@@ -120,10 +169,14 @@ void main() {
 """
 
 # Background grid: procedural dots at "nice" world-spaced nodes (fullscreen pass).
+# Everything stays in *view-relative* world units for the same f32 reason as
+# _TRANSFORM: node positions are found from u_org_mod, the camera center reduced
+# mod the grid spacing on the CPU in f64, so the shader never handles a large
+# absolute coordinate (which would make the dots wobble or smear at deep zoom).
 _FRAG_GRID = """
 #version 330
 uniform vec2 u_scale;
-uniform vec2 u_offset;
+uniform vec2 u_org_mod;       // camera center mod u_spacing (f64-reduced on the CPU)
 uniform vec2 u_viewport;
 uniform float u_spacing;
 uniform float u_upp;
@@ -133,9 +186,10 @@ uniform float u_dot_px;
 out vec4 f_color;
 void main() {
     vec2 clip = 2.0 * gl_FragCoord.xy / u_viewport - 1.0;
-    vec2 world = (clip - u_offset) / u_scale;
-    vec2 node = floor(world / u_spacing + 0.5) * u_spacing;
-    float dpx = length(world - node) / u_upp;       // distance to nearest node, px
+    vec2 rel = clip / u_scale;                      // world offset from view center
+    vec2 p = rel + u_org_mod;                       // ...in the node lattice's phase
+    vec2 node = floor(p / u_spacing + 0.5) * u_spacing;
+    float dpx = length(p - node) / u_upp;           // distance to nearest node, px
     float a = 1.0 - smoothstep(u_dot_px - 0.75, u_dot_px + 0.75, dpx);
     if (a <= 0.0) discard;
     f_color = vec4(u_dot_color, a * u_dot_alpha);
@@ -149,7 +203,7 @@ void main() {
 _FRAG_THICK = """
 #version 330
 uniform vec2 u_scale;
-uniform vec2 u_offset;
+uniform vec2 u_org_bb;        // camera center - bbmin (f64-differenced on the CPU)
 uniform vec2 u_viewport;
 uniform vec2 u_bbmin;
 uniform vec2 u_bbmax;
@@ -161,8 +215,7 @@ uniform sampler2D u_lut;
 out vec4 f_color;
 void main() {
     vec2 clip = 2.0 * gl_FragCoord.xy / u_viewport - 1.0;
-    vec2 world = (clip - u_offset) / u_scale;
-    vec2 uv = (world - u_bbmin) / (u_bbmax - u_bbmin);
+    vec2 uv = (clip / u_scale + u_org_bb) / (u_bbmax - u_bbmin);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
     vec2 s = texture(u_field, uv).rg;           // r = raw nm, g = coverage
     if (s.g < 0.5) discard;                      // no measured data here
@@ -178,12 +231,11 @@ void main() {
 # draw). Colors are chosen per background so the highlight stays vivid in both.
 _VERT_SEL = """
 #version 330
-uniform vec2 u_scale;
-uniform vec2 u_offset;
+TRANSFORM
 uniform float u_point_size;
 in vec2 in_pos;
 void main() {
-    gl_Position = vec4(in_pos * u_scale + u_offset, 0.0, 1.0);
+    gl_Position = vec4(to_clip(in_pos), 0.0, 1.0);
     gl_PointSize = u_point_size;
 }
 """
@@ -225,6 +277,60 @@ def _nice_spacing(raw: float) -> float:
     return nice * base
 
 
+class _CircleGroup:
+    """One instanced circle batch: all members within a 2x radius band, so they
+    can share a segment count (see GLScene._build_circles).
+
+    Holds two GPU buffers over the same instances -- the full set, and a scratch
+    buffer refilled per frame with only the instances inside the view. The
+    scratch path exists because segment count is a *uniform*: zoomed deep into
+    one circle every instance in the group pays that circle's tessellation, so
+    83k off-screen vias were being shaded at 160 segments to draw the one on
+    screen (measured: 4.3 -> 7.4 ms at a 0.5 um view). Culling is skipped
+    entirely unless the group is both large and highly tessellated, which is
+    exactly the zoomed-in case -- at a fit view the mask never runs.
+    """
+
+    def __init__(self, scene, ctx, inst):
+        self.n = len(inst)
+        self.xy = np.ascontiguousarray(inst[:, :2])       # for the per-frame cull
+        self.r = np.ascontiguousarray(inst[:, 2])
+        self.rmax = float(self.r.max())
+        self._inst = np.ascontiguousarray(inst)
+        fmt = "3f 1f/i", "in_circ", "in_clayer"
+        buf = scene._own(ctx.buffer(self._inst.tobytes()))
+        self.vao = scene._own(ctx.vertex_array(scene.circ_prog, [(buf, *fmt)]))
+        self._cull_buf = self._cull_vao = None
+        self._ctx, self._scene, self._fmt = ctx, scene, fmt
+
+    def visible(self, origin, half_w, half_h, seg):
+        """Return (vao, instance_count) to draw this frame."""
+        if self.n < _CIRCLE_CULL_MIN or seg <= _CIRCLE_CULL_SEG:
+            return self.vao, self.n            # cheap already; skip the mask
+        ox, oy = origin
+        m = ((np.abs(self.xy[:, 0] - ox) <= half_w + self.r) &
+             (np.abs(self.xy[:, 1] - oy) <= half_h + self.r))
+        k = int(m.sum())
+        if k > self.n // 2:                    # most are on screen; not worth the upload
+            return self.vao, self.n
+        if self._cull_vao is None:             # allocate once, at full size
+            self._cull_buf = self._scene._own(self._ctx.buffer(reserve=self._inst.nbytes))
+            self._cull_vao = self._scene._own(self._ctx.vertex_array(
+                self._scene.circ_prog, [(self._cull_buf, *self._fmt)]))
+        if k:
+            self._cull_buf.write(self._inst[m].tobytes())
+        return self._cull_vao, k
+
+
+def _circle_segments(r_px: float) -> int:
+    """Ring segments for a circle of ``r_px`` on-screen pixel radius, so the
+    chord sagitta stays under _CIRCLE_TOL_PX."""
+    if r_px <= _CIRCLE_TOL_PX:
+        return _CIRCLE_MIN_SEG
+    n = math.pi / math.acos(max(1.0 - _CIRCLE_TOL_PX / r_px, -1.0))
+    return int(min(max(math.ceil(n), _CIRCLE_MIN_SEG), _CIRCLE_MAX_SEG))
+
+
 def nice_grid_spacing(upp: float) -> float:
     """Grid/scale-bar spacing (world units) for a given units-per-pixel."""
     return _nice_spacing(upp * _GRID_TARGET_PX)
@@ -262,16 +368,21 @@ class GLScene:
         self.wind_downsample = 2
 
         maxl = str(self.n_layers)
+
+        def vs(src):
+            """Expand the shared TRANSFORM helper + the layer-array size."""
+            return src.replace("TRANSFORM", _TRANSFORM).replace("MAXL", maxl)
+
         self.outline_prog = self._own(ctx.program(
-            vertex_shader=_VERT_OUTLINE.replace("MAXL", maxl), fragment_shader=_FRAG_COLOR))
+            vertex_shader=vs(_VERT_OUTLINE), fragment_shader=_FRAG_COLOR))
         self.circ_prog = self._own(ctx.program(
-            vertex_shader=_VERT_CIRCLE.replace("MAXL", maxl), fragment_shader=_FRAG_COLOR))
-        self.wind_prog = self._own(ctx.program(vertex_shader=_VERT_WIND, fragment_shader=_FRAG_WIND))
+            vertex_shader=vs(_VERT_CIRCLE), fragment_shader=_FRAG_COLOR))
+        self.wind_prog = self._own(ctx.program(vertex_shader=vs(_VERT_WIND), fragment_shader=_FRAG_WIND))
         self.cover_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_COVER))
         self.grid_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_GRID))
         self.thick_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_THICK))
-        self.sel_line_prog = self._own(ctx.program(vertex_shader=_VERT_SEL, fragment_shader=_FRAG_SEL_LINE))
-        self.sel_pt_prog = self._own(ctx.program(vertex_shader=_VERT_SEL, fragment_shader=_FRAG_SEL_PT))
+        self.sel_line_prog = self._own(ctx.program(vertex_shader=vs(_VERT_SEL), fragment_shader=_FRAG_SEL_LINE))
+        self.sel_pt_prog = self._own(ctx.program(vertex_shader=vs(_VERT_SEL), fragment_shader=_FRAG_SEL_PT))
         for prog in (self.outline_prog, self.circ_prog):
             prog["u_color"].write(self.colors.tobytes())
 
@@ -433,28 +544,34 @@ class GLScene:
     def _build_circles(self, ctx, layout) -> None:
         circ = np.asarray(layout.circ, np.float32)
         self.n_circ = len(circ)
-        self.circ_loop_vao = self.circ_fan_vao = None
+        self.circ_groups = []
         if self.n_circ == 0:
             return
         clayer = np.asarray(layout.circ_layer, np.float32)
+        r = circ[:, 2]
+
+        # Segment count is a per-draw uniform, so every circle in one draw call
+        # pays the largest member's tessellation. A single batch is therefore
+        # badly mismatched on real layouts: this file is 83,154 vias at r~0.53
+        # plus 36 pads at r~104, and one batch would give all 83k the pads'
+        # 256 segments (measured: 4.6 -> 12.7 ms at a 20 um view). Grouping by
+        # radius octave (floor(log2 r)) keeps each batch within 2x, so the vias
+        # get ~26 segments and only the 36 pads get 256. Octaves are sparse, so
+        # this is typically 1-3 draw calls, and each is one contiguous buffer.
+        octave = np.floor(np.log2(np.maximum(r, 1e-30))).astype(np.int64)
+        order = np.argsort(octave, kind="stable")
         inst = np.empty((self.n_circ, 4), np.float32)
-        inst[:, :3] = circ
-        inst[:, 3] = np.clip(clayer, 0, self.n_layers - 1)
-        inst_buf = self._own(ctx.buffer(inst.tobytes()))
+        inst[:, :3] = circ[order]
+        inst[:, 3] = np.clip(clayer[order], 0, self.n_layers - 1)
 
-        th = np.linspace(0.0, 2.0 * np.pi, _CIRCLE_SEGMENTS, endpoint=False)
-        ring = np.stack([np.cos(th), np.sin(th)], axis=1).astype(np.float32)
-        fan = np.empty((_CIRCLE_SEGMENTS + 2, 2), np.float32)
-        fan[0] = (0.0, 0.0)
-        fan[1:_CIRCLE_SEGMENTS + 1] = ring
-        fan[_CIRCLE_SEGMENTS + 1] = ring[0]
-        self._fan_n = _CIRCLE_SEGMENTS + 2
-
-        inst_fmt = (inst_buf, "3f 1f/i", "in_circ", "in_clayer")
-        self.circ_loop_vao = self._own(ctx.vertex_array(
-            self.circ_prog, [(self._own(ctx.buffer(ring.tobytes())), "2f", "in_unit"), inst_fmt]))
-        self.circ_fan_vao = self._own(ctx.vertex_array(
-            self.circ_prog, [(self._own(ctx.buffer(fan.tobytes())), "2f", "in_unit"), inst_fmt]))
+        bounds = np.flatnonzero(np.diff(octave[order])) + 1
+        # No unit-ring vertex buffer: the ring is generated from gl_VertexID in
+        # _VERT_CIRCLE, so a VAO carries instance attributes only and the segment
+        # count is a free per-frame uniform instead of buffer geometry. One VAO
+        # per group serves both the fan and the loop draw (they differ only in
+        # primitive type, vertex count, and the u_fan uniform).
+        for lo, hi in zip(np.r_[0, bounds], np.r_[bounds, self.n_circ]):
+            self.circ_groups.append(_CircleGroup(self, ctx, inst[lo:hi]))
 
     # -- per-frame state --------------------------------------------------
     def set_layer_visible(self, layer_id: int, visible: bool) -> None:
@@ -570,22 +687,22 @@ class GLScene:
         self._wind_fbo = self.ctx.framebuffer(color_attachments=[self._wind_tex])
         self._wind_size = size
 
-    def _screen_scissor(self, lid, scale, offset, W, H):
+    def _screen_scissor(self, lid, scale, origin, W, H):
         """Pixel-space (x, y, w, h) scissor rect (GL bottom-left origin) for
         layer ``lid``'s on-screen bbox, clamped to a ``W``x``H`` framebuffer
         (pass the wind buffer's own, possibly downsampled, size to get a
         scissor rect for it instead of the full-resolution main framebuffer),
-        or None if it's entirely off-screen. clip = world * scale + offset
-        (same transform the vertex shaders use); world/clip +y is up,
-        matching GL window coordinates, so no axis flip is needed."""
+        or None if it's entirely off-screen. clip = (world - origin) * scale
+        (same transform the vertex shaders use, in f64 here); world/clip +y is
+        up, matching GL window coordinates, so no axis flip is needed."""
         xmin, xmax = self._layer_xmin[lid], self._layer_xmax[lid]
         ymin, ymax = self._layer_ymin[lid], self._layer_ymax[lid]
         if xmin > xmax:                                    # no fillable geometry
             return None
         sx, sy = scale
-        ox, oy = offset
-        cx0, cx1 = xmin * sx + ox, xmax * sx + ox
-        cy0, cy1 = ymin * sy + oy, ymax * sy + oy
+        ox, oy = origin
+        cx0, cx1 = (xmin - ox) * sx, (xmax - ox) * sx
+        cy0, cy1 = (ymin - oy) * sy, (ymax - oy) * sy
         x0 = int(np.floor((cx0 + 1.0) * 0.5 * W)) - 1       # -1px margin: AA/winding can
         x1 = int(np.ceil((cx1 + 1.0) * 0.5 * W)) + 1        # touch a pixel just outside
         y0 = int(np.floor((cy0 + 1.0) * 0.5 * H)) - 1       # the exact transformed bbox
@@ -596,32 +713,58 @@ class GLScene:
             return None
         return (x0, y0, x1 - x0, y1 - y0)
 
-    def draw(self, main_fbo, scale, offset, grid_spacing=None) -> None:
+    def draw(self, main_fbo, scale, origin, grid_spacing=None) -> None:
         """Render into ``main_fbo`` (already bound + cleared by the caller).
+
+        ``origin`` is the camera center in world units (``cam.cx, cam.cy``);
+        everything is transformed relative to it — see _TRANSFORM for why.
 
         ``grid_spacing`` overrides the grid/scale-bar spacing (world units); pass
         the camera-derived value so it matches the on-screen scale bar exactly.
         """
         ctx = self.ctx
         scale = (float(scale[0]), float(scale[1]))
-        offset = (float(offset[0]), float(offset[1]))
+        origin = (float(origin[0]), float(origin[1]))
+        # f32 head + f64 tail of the camera center; the shader subtracts them in
+        # that order so the large cancellation happens exactly.
+        hi = (float(np.float32(origin[0])), float(np.float32(origin[1])))
+        lo = (origin[0] - hi[0], origin[1] - hi[1])
         for prog in (self.outline_prog, self.circ_prog):
             prog["u_scale"].value = scale
-            prog["u_offset"].value = offset
+            prog["u_org_hi"].value = hi
+            prog["u_org_lo"].value = lo
             prog["u_visible"].write(self.visible.tobytes())
         self.wind_prog["u_scale"].value = scale
-        self.wind_prog["u_offset"].value = offset
+        self.wind_prog["u_org_hi"].value = hi
+        self.wind_prog["u_org_lo"].value = lo
 
         # Grid spacing (also drives the on-screen scale bar) — computed every frame.
         W, H = main_fbo.size
         upp = 2.0 / (scale[0] * W)
         self.grid_spacing = float(grid_spacing) if grid_spacing else _nice_spacing(upp * _GRID_TARGET_PX)
 
+        # Zoom-adaptive circle tessellation, per radius group (see
+        # _build_circles): the fewest segments keeping the chord sagitta under
+        # _CIRCLE_TOL_PX for that group's largest circle. sagitta =
+        # r*(1 - cos(pi/n)) px, so n = pi / acos(1 - tol/r_px). Zoomed out this
+        # bottoms out at _CIRCLE_MIN_SEG (fewer vertices than the old fixed 64);
+        # zoomed in it rises until the arcs are smooth.
+        # ...then drop the instances outside the view, so a deep zoom doesn't
+        # shade the whole group at the on-screen circle's segment count.
+        half_w, half_h = 0.5 * W * upp, 0.5 * H * upp
+        circ_draws = []
+        for g in self.circ_groups:
+            seg = _circle_segments(g.rmax / upp)
+            vao, n = g.visible(origin, half_w, half_h, seg)
+            if n:
+                circ_draws.append((vao, n, seg))
+
         # Pass -1: film-thickness colormap (behind everything, incl. the grid).
         if self.show_thickness and self._thick_tex is not None:
             tp = self.thick_prog
             tp["u_scale"].value = scale
-            tp["u_offset"].value = offset
+            tp["u_org_bb"].value = (origin[0] - self._thick_bbox[0],
+                                    origin[1] - self._thick_bbox[1])
             tp["u_viewport"].value = (float(W), float(H))
             tp["u_bbmin"].value = (self._thick_bbox[0], self._thick_bbox[1])
             tp["u_bbmax"].value = (self._thick_bbox[2], self._thick_bbox[3])
@@ -642,7 +785,10 @@ class GLScene:
         if self.show_grid:
             gp = self.grid_prog
             gp["u_scale"].value = scale
-            gp["u_offset"].value = offset
+            # Reduce the center mod the spacing in f64 so the shader only ever
+            # sees a small lattice phase, never a 7000-unit absolute coordinate.
+            gp["u_org_mod"].value = (math.fmod(origin[0], self.grid_spacing),
+                                     math.fmod(origin[1], self.grid_spacing))
             gp["u_viewport"].value = (float(W), float(H))
             gp["u_spacing"].value = self.grid_spacing
             gp["u_upp"].value = upp
@@ -678,13 +824,13 @@ class GLScene:
                 cnt, off = int(self._fill_count[lid]), int(self._fill_off[lid])
                 if cnt == 0 or self.visible[lid] < 0.5:
                     continue
-                rect = self._screen_scissor(lid, scale, offset, W, H)
+                rect = self._screen_scissor(lid, scale, origin, W, H)
                 if rect is None:
                     continue                                          # entirely off-screen
                 # The wind buffer may be downsampled relative to main_fbo (see
                 # wind_downsample), so it needs its own scissor rect computed
                 # against its own (smaller) size, not main_fbo's.
-                wind_rect = self._screen_scissor(lid, scale, offset, wW, wH) if (wW, wH) != (W, H) else rect
+                wind_rect = self._screen_scissor(lid, scale, origin, wW, wH) if (wW, wH) != (W, H) else rect
                 if wind_rect is None:
                     continue
                 self._wind_fbo.scissor = wind_rect
@@ -702,13 +848,15 @@ class GLScene:
             main_fbo.scissor = None        # restore full viewport for the passes below
 
         # Pass 1b: convex circle fills (plain alpha).
-        if self.show_fill and self.circ_fan_vao is not None:
+        if self.show_fill and circ_draws:
             main_fbo.use()
             ctx.enable(moderngl.BLEND)
             ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
             self.circ_prog["u_alpha"].value = self.fill_alpha
-            self.circ_fan_vao.render(
-                moderngl.TRIANGLE_FAN, vertices=self._fan_n, instances=self.n_circ)
+            self.circ_prog["u_fan"].value = 1              # vertex 0 = fan center
+            for vao, n, seg in circ_draws:
+                self.circ_prog["u_seg"].value = seg
+                vao.render(moderngl.TRIANGLE_FAN, vertices=seg + 2, instances=n)
 
         # Pass 2: opaque outlines on top.
         main_fbo.use()
@@ -716,17 +864,20 @@ class GLScene:
         self.outline_prog["u_alpha"].value = 1.0
         if self.line_vao is not None:
             self.line_vao.render(moderngl.LINES)
-        if self.circ_loop_vao is not None:
+        if circ_draws:
             self.circ_prog["u_alpha"].value = 1.0
-            self.circ_loop_vao.render(
-                moderngl.LINE_LOOP, vertices=_CIRCLE_SEGMENTS, instances=self.n_circ)
+            self.circ_prog["u_fan"].value = 0             # no center vertex
+            for vao, n, seg in circ_draws:
+                self.circ_prog["u_seg"].value = seg
+                vao.render(moderngl.LINE_LOOP, vertices=seg, instances=n)
 
         # Pass 3: selected-polygon highlight (amber edges + vertex dots) on top.
         if self._sel_line_vao is not None and self._sel_n > 0:
             hl = _SEL_COLOR_DARK if self._shade >= 1.0 else _SEL_COLOR_LIGHT
             for prog in (self.sel_line_prog, self.sel_pt_prog):
                 prog["u_scale"].value = scale
-                prog["u_offset"].value = offset
+                prog["u_org_hi"].value = hi
+                prog["u_org_lo"].value = lo
                 prog["u_color"].value = hl
             ctx.disable(moderngl.BLEND)
             self._sel_line_vao.render(moderngl.LINES, vertices=self._sel_line_count)

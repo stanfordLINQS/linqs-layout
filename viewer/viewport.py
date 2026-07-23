@@ -158,8 +158,7 @@ class GLViewport(QOpenGLWidget):
         fbo.use()
         self.ctx.clear(*self.bg)
         if self.scene is not None:
-            (sx, sy), (ox, oy) = self.cam.scale_offset()
-            self.scene.draw(fbo, (sx, sy), (ox, oy),
+            self.scene.draw(fbo, self.cam.scale(), (self.cam.cx, self.cam.cy),
                             grid_spacing=nice_grid_spacing(self.cam.upp))
         self.overlay.update()           # keep the HUD (scale bar, measurement) in sync
 

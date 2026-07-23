@@ -36,14 +36,13 @@ def render_array(layout, size=(1600, 1400), visible=None, bg=BG) -> np.ndarray:
         cam = Camera2D()
         cam.resize(w, h)
         cam.fit(layout.bbox())
-        (sx, sy), (ox, oy) = cam.scale_offset()
 
         # 4x MSAA render target, resolved into a plain framebuffer for readback.
         color = ctx.renderbuffer((w, h), samples=4)
         msaa = ctx.framebuffer(color_attachments=[color])
         msaa.use()
         ctx.clear(*bg)
-        scene.draw(msaa, (sx, sy), (ox, oy))
+        scene.draw(msaa, cam.scale(), (cam.cx, cam.cy))
 
         resolved = ctx.simple_framebuffer((w, h))
         ctx.copy_framebuffer(resolved, msaa)
