@@ -14,12 +14,17 @@ Geometry is uploaded once and redrawn every frame. Three kinds of primitive:
     instanced ``GL_LINE_LOOP`` batches. Opaque, drawn on top.
   * **Circle fill** — circles are convex, so their instanced triangle fan fills
     correctly with plain alpha blending (no winding needed).
+  * **Bulge arcs** — a DXF bulge (code 42) makes a polyline segment a circular
+    arc. The chord edge is dropped from the outline batch and the arc drawn as
+    an instanced ``GL_LINE_STRIP``; for the fill, an instanced fan over the arc
+    contributes the circular segment the chord left out, straight into the same
+    winding buffer (so an outward bulge adds it and an inward one cancels it).
 
-Circles carry no ring geometry at all: the unit ring is generated in the vertex
-shader from ``gl_VertexID``, so the segment count is a per-frame uniform picked
-from the on-screen pixel radius. Instances are batched by radius octave (they
-share that uniform) and, when zoomed in far enough for it to pay, culled to the
-view each frame — see :class:`_CircleGroup`.
+Circles and arcs carry no ring geometry at all: points are generated in the
+vertex shader from ``gl_VertexID``, so the segment count is a per-frame uniform
+picked from the on-screen pixel radius. Instances are batched by radius octave
+because they share that uniform (:class:`_CircleGroup`, :class:`_ArcBatch`), and
+circles are additionally culled to the view when zoomed in far enough to pay.
 
 Each outline vertex carries a layer id; the vertex shader looks up that layer's
 color and visibility from small uniform arrays, so showing/hiding or recoloring a
@@ -32,6 +37,7 @@ offscreen renderer; only the moderngl context and target framebuffer differ.
 from __future__ import annotations
 
 import math
+import typing
 
 import moderngl
 import numpy as np
@@ -139,6 +145,55 @@ _VERT_WIND = """
 TRANSFORM
 in vec2 in_pos;
 void main() { gl_Position = vec4(to_clip(in_pos), 0.0, 1.0); }
+"""
+
+# --- Bulge arcs -------------------------------------------------------------
+# A DXF bulge (code 42) says "the segment leaving this vertex is a circular arc,
+# not a chord". They are kept as arcs end to end (parser -> instance buffer ->
+# here) and tessellated per frame from ``u_seg``, exactly like circles: baking
+# points at load would inflate a 4.5 M-vertex file and still facet when zoomed.
+# One instance is (center, radius, start angle, sweep); ARC_POINT walks it.
+_ARC_POINT = """
+in vec4 in_arc;           // cx, cy, radius, start angle
+in vec2 in_arc2;          // sweep angle (signed), layer id
+vec2 arc_point() {
+    float t = float(gl_VertexID) / float(u_seg);
+    float a = in_arc.w + in_arc2.x * t;
+    return in_arc.xy + in_arc.z * vec2(cos(a), sin(a));
+}
+"""
+
+# Outline: LINE_STRIP of u_seg+1 points along the arc, colored per layer.
+_VERT_ARC = """
+#version 330
+TRANSFORM
+uniform vec3 u_color[MAXL];
+uniform float u_visible[MAXL];
+uniform int u_seg;
+ARC_POINT
+out vec3 v_color;
+void main() {
+    int lid = int(in_arc2.y + 0.5);
+    v_color = u_color[lid];
+    if (u_visible[lid] < 0.5)
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    else
+        gl_Position = vec4(to_clip(arc_point()), 0.0, 1.0);
+}
+"""
+
+# Fill: TRIANGLE_FAN of u_seg+1 points, apex at the arc start. That covers the
+# *circular segment* between the chord and the arc -- the bit the chord polygon
+# is missing. It composes with the polygon's own fan for free because the fill
+# is winding-number based: the fan's triangles wind the same way as the polygon
+# for an outward bulge (so the region is added) and the opposite way for an
+# inward one (so it cancels), which _FRAG_WIND reads straight off gl_FrontFacing.
+_VERT_ARC_WIND = """
+#version 330
+TRANSFORM
+uniform int u_seg;
+ARC_POINT
+void main() { gl_Position = vec4(to_clip(arc_point()), 0.0, 1.0); }
 """
 
 _FRAG_WIND = """
@@ -322,6 +377,29 @@ class _CircleGroup:
         return self._cull_vao, k
 
 
+class _ArcBatch(typing.NamedTuple):
+    """One instanced batch of bulge arcs sharing a layer and a radius octave.
+
+    Both keys matter: the fill pass runs per layer, and the segment count is a
+    uniform, so members must be within 2x in radius or the small ones pay the
+    big ones' tessellation. ``outline_vao`` and ``fill_vao`` are two views of
+    the same instance buffer, bound to the color and winding programs.
+    """
+    layer: int
+    n: int
+    rmax: float
+    sweep_max: float
+    outline_vao: object
+    fill_vao: object
+
+    def segments(self, upp: float) -> int:
+        """Segment count for this batch at ``upp`` world units per pixel: the
+        circle rule, scaled down to the fraction of a full turn it spans."""
+        full = _circle_segments(self.rmax / upp)
+        return max(1, min(_CIRCLE_MAX_SEG,
+                          math.ceil(full * self.sweep_max / (2.0 * math.pi))))
+
+
 def _circle_segments(r_px: float) -> int:
     """Ring segments for a circle of ``r_px`` on-screen pixel radius, so the
     chord sagitta stays under _CIRCLE_TOL_PX."""
@@ -370,20 +448,25 @@ class GLScene:
         maxl = str(self.n_layers)
 
         def vs(src):
-            """Expand the shared TRANSFORM helper + the layer-array size."""
-            return src.replace("TRANSFORM", _TRANSFORM).replace("MAXL", maxl)
+            """Expand the shared TRANSFORM / ARC_POINT helpers + the layer-array size."""
+            return (src.replace("TRANSFORM", _TRANSFORM)
+                       .replace("ARC_POINT", _ARC_POINT).replace("MAXL", maxl))
 
         self.outline_prog = self._own(ctx.program(
             vertex_shader=vs(_VERT_OUTLINE), fragment_shader=_FRAG_COLOR))
         self.circ_prog = self._own(ctx.program(
             vertex_shader=vs(_VERT_CIRCLE), fragment_shader=_FRAG_COLOR))
         self.wind_prog = self._own(ctx.program(vertex_shader=vs(_VERT_WIND), fragment_shader=_FRAG_WIND))
+        self.arc_prog = self._own(ctx.program(
+            vertex_shader=vs(_VERT_ARC), fragment_shader=_FRAG_COLOR))
+        self.arc_wind_prog = self._own(ctx.program(
+            vertex_shader=vs(_VERT_ARC_WIND), fragment_shader=_FRAG_WIND))
         self.cover_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_COVER))
         self.grid_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_GRID))
         self.thick_prog = self._own(ctx.program(vertex_shader=_VERT_COVER, fragment_shader=_FRAG_THICK))
         self.sel_line_prog = self._own(ctx.program(vertex_shader=vs(_VERT_SEL), fragment_shader=_FRAG_SEL_LINE))
         self.sel_pt_prog = self._own(ctx.program(vertex_shader=vs(_VERT_SEL), fragment_shader=_FRAG_SEL_PT))
-        for prog in (self.outline_prog, self.circ_prog):
+        for prog in (self.outline_prog, self.circ_prog, self.arc_prog):
             prog["u_color"].write(self.colors.tobytes())
 
         fs = np.array([-1, -1, 3, -1, -1, 3], np.float32)      # fullscreen triangle
@@ -417,6 +500,7 @@ class GLScene:
         self._build_polylines(ctx, layout)
         self._build_fill(ctx, layout)
         self._build_circles(ctx, layout)
+        self._build_arcs(ctx, layout)
 
     # -- lifetime ---------------------------------------------------------
     def _own(self, obj):
@@ -480,6 +564,15 @@ class GLScene:
         line_idx = np.empty((n, 2), np.uint32)
         line_idx[:, 0] = np.arange(n, dtype=np.uint32)
         line_idx[:, 1] = nxt.astype(np.uint32)
+        self._nxt = nxt                       # reused by _build_arcs
+        # Drop the chord edge of every bulged vertex — the arc pass draws that
+        # segment instead, and leaving both in would show the chord cutting
+        # across the arc.
+        bi = np.asarray(getattr(layout, "bulge_idx", ()), np.int64)
+        if len(bi):
+            keep = np.ones(n, bool)
+            keep[bi[(bi >= 0) & (bi < n)]] = False
+            line_idx = line_idx[keep]
         self.line_vao = self._own(ctx.vertex_array(
             self.outline_prog,
             [(self._pos_buf, "2f", "in_pos"), (self._lay_buf, "1f", "in_layer")],
@@ -572,6 +665,92 @@ class GLScene:
         # primitive type, vertex count, and the u_fan uniform).
         for lo, hi in zip(np.r_[0, bounds], np.r_[bounds, self.n_circ]):
             self.circ_groups.append(_CircleGroup(self, ctx, inst[lo:hi]))
+
+    def _build_arcs(self, ctx, layout) -> None:
+        """Turn sparse bulges into arc instances (center, radius, start, sweep).
+
+        DXF stores a curved segment as its two endpoints plus a bulge factor
+        b = tan(sweep/4) on the first, sign positive for counter-clockwise. All
+        of the recovery is vectorized over the whole file at once — no per-arc
+        Python. Nothing is tessellated here; the shaders do that per frame.
+        """
+        self.arc_batches = []                 # _ArcBatch per (layer, radius octave)
+        self.n_arc = 0
+        bi = np.asarray(getattr(layout, "bulge_idx", ()), np.int64)
+        if len(bi) == 0 or self._raw_pos is None:
+            return
+        bv = np.asarray(layout.bulge_val, np.float64)
+        v = np.asarray(layout.verts, np.float64)
+        n = len(v)
+        ok = (bi >= 0) & (bi < n)
+        bi, bv = bi[ok], bv[ok]
+
+        p0 = v[bi]
+        p1 = v[self._nxt[bi]]
+        c = p1 - p0
+        d = np.hypot(c[:, 0], c[:, 1])
+        sweep = 4.0 * np.arctan(bv)                     # signed included angle
+        sin_h = np.sin(0.5 * sweep)
+        # A zero-length chord or a zero sweep is not an arc (degenerate data).
+        good = (d > 0) & (np.abs(sin_h) > 1e-12)
+        bi, p0, p1, c, d, sweep, sin_h = (a[good] for a in (bi, p0, p1, c, d, sweep, sin_h))
+        if len(bi) == 0:
+            return
+
+        r = d / (2.0 * sin_h)                           # signed radius
+        # Center sits off the chord midpoint along the chord normal by
+        # r*cos(sweep/2); carrying the signs through handles both bulge
+        # directions and both major/minor arcs without a special case.
+        mid = 0.5 * (p0 + p1)
+        nx, ny = -c[:, 1] / d, c[:, 0] / d              # unit chord normal
+        h = r * np.cos(0.5 * sweep)
+        cen = np.stack([mid[:, 0] + h * nx, mid[:, 1] + h * ny], axis=1)
+        a0 = np.arctan2(p0[:, 1] - cen[:, 1], p0[:, 0] - cen[:, 0])
+        rad = np.abs(r)
+
+        # Owning polyline -> layer (poly_start is sorted, so this is a search).
+        poly = np.searchsorted(self._start, bi, side="right") - 1
+        alayer = np.clip(self._layer[poly], 0, self.n_layers - 1)
+
+        inst = np.empty((len(bi), 6), np.float32)
+        inst[:, 0], inst[:, 1] = cen[:, 0], cen[:, 1]
+        inst[:, 2], inst[:, 3] = rad, a0
+        inst[:, 4], inst[:, 5] = sweep, alayer
+        self.n_arc = len(inst)
+
+        # Batch by (layer, radius octave). Layer is required — the fill runs one
+        # winding pass per layer and GL 4.1 has no base-instance, so each layer's
+        # arcs need their own contiguous buffer. Octave is required for the same
+        # reason circles are grouped by it: the segment count is a *uniform*, so
+        # without it a single large-radius arc would drag every arc in the batch
+        # up to its tessellation. Both keys are sparse in practice — this file
+        # yields one batch for 173 k arcs.
+        octave = np.floor(np.log2(np.maximum(rad, 1e-30))).astype(np.int64)
+        key = alayer.astype(np.int64) * 4096 + octave
+        order = np.argsort(key, kind="stable")
+        sk = key[order]
+        bounds = np.flatnonzero(np.diff(sk)) + 1
+        fmt = "4f 2f/i", "in_arc", "in_arc2"
+        for lo, hi in zip(np.r_[0, bounds], np.r_[bounds, len(sk)]):
+            sel = order[lo:hi]
+            buf = self._own(ctx.buffer(inst[sel].tobytes()))
+            self.arc_batches.append(_ArcBatch(
+                layer=int(alayer[sel[0]]),
+                n=len(sel),
+                rmax=float(rad[sel].max()),
+                sweep_max=float(np.abs(sweep[sel]).max()),
+                outline_vao=self._own(ctx.vertex_array(self.arc_prog, [(buf, *fmt)])),
+                fill_vao=self._own(ctx.vertex_array(self.arc_wind_prog, [(buf, *fmt)])),
+            ))
+
+        # Arcs bow outside the chord polygon, so the per-layer scissor bbox
+        # (built from chord vertices) can clip them. Widen it by each arc's
+        # bounding circle — conservative, and only a few dozen layers wide.
+        if getattr(self, "_layer_xmin", None) is not None:
+            np.minimum.at(self._layer_xmin, alayer, cen[:, 0] - rad)
+            np.maximum.at(self._layer_xmax, alayer, cen[:, 0] + rad)
+            np.minimum.at(self._layer_ymin, alayer, cen[:, 1] - rad)
+            np.maximum.at(self._layer_ymax, alayer, cen[:, 1] + rad)
 
     # -- per-frame state --------------------------------------------------
     def set_layer_visible(self, layer_id: int, visible: bool) -> None:
@@ -752,6 +931,18 @@ class GLScene:
         # ...then drop the instances outside the view, so a deep zoom doesn't
         # shade the whole group at the on-screen circle's segment count.
         half_w, half_h = 0.5 * W * upp, 0.5 * H * upp
+        # Arc tessellation: the same sagitta rule, scaled to the sweep (a 90 deg
+        # arc needs a quarter of a full circle's segments for the same smoothness).
+        arc_segs = [b.segments(upp) for b in self.arc_batches]
+        if self.n_arc:
+            self.arc_prog["u_org_hi"].value = hi
+            self.arc_prog["u_org_lo"].value = lo
+            self.arc_prog["u_scale"].value = scale
+            self.arc_prog["u_visible"].write(self.visible.tobytes())
+            self.arc_wind_prog["u_org_hi"].value = hi
+            self.arc_wind_prog["u_org_lo"].value = lo
+            self.arc_wind_prog["u_scale"].value = scale
+
         circ_draws = []
         for g in self.circ_groups:
             seg = _circle_segments(g.rmax / upp)
@@ -838,6 +1029,14 @@ class GLScene:
                 ctx.clear(0.0)
                 ctx.blend_func = moderngl.ONE, moderngl.ONE          # accumulate winding
                 self.fill_vao.render(moderngl.TRIANGLES, vertices=cnt, first=off)
+                # Bulge arcs on this layer: each adds (or, for an inward bulge,
+                # cancels) the circular segment its chord left out. Same winding
+                # buffer, so it composes with the polygon fans above for free.
+                for b, seg in zip(self.arc_batches, arc_segs):
+                    if b.layer == lid:
+                        self.arc_wind_prog["u_seg"].value = seg
+                        b.fill_vao.render(moderngl.TRIANGLE_FAN,
+                                          vertices=seg + 1, instances=b.n)
 
                 main_fbo.scissor = rect
                 main_fbo.use()
@@ -864,6 +1063,12 @@ class GLScene:
         self.outline_prog["u_alpha"].value = 1.0
         if self.line_vao is not None:
             self.line_vao.render(moderngl.LINES)
+        if self.arc_batches:
+            self.arc_prog["u_alpha"].value = 1.0
+            for b, seg in zip(self.arc_batches, arc_segs):
+                self.arc_prog["u_seg"].value = seg
+                b.outline_vao.render(moderngl.LINE_STRIP,
+                                     vertices=seg + 1, instances=b.n)
         if circ_draws:
             self.circ_prog["u_alpha"].value = 1.0
             self.circ_prog["u_fan"].value = 0             # no center vertex

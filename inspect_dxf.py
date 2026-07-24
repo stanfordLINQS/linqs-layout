@@ -48,6 +48,7 @@ def main() -> None:
             "n_polylines": doc.n_polylines,
             "n_vertices": doc.n_vertices,
             "n_circles": doc.n_circles,
+            "n_arcs": len(doc.bulge_idx),
             "n_layers": doc.n_layers,
             "bbox": {"xmin": bb.xmin, "ymin": bb.ymin, "xmax": bb.xmax, "ymax": bb.ymax},
             "layers": [
@@ -71,6 +72,9 @@ def main() -> None:
     print(f"    polylines  {doc.n_polylines:>12,}")
     print(f"    vertices   {doc.n_vertices:>12,}  (avg {doc.n_vertices/max(doc.n_polylines,1):.1f}/polyline)")
     print(f"    circles    {doc.n_circles:>12,}")
+    n_arc = len(doc.bulge_idx)
+    if n_arc:
+        print(f"    arcs       {n_arc:>12,}  (bulged polyline segments)")
     print(f"    layers     {doc.n_layers:>12,}")
     print(f"\n  Extent       {bb}")
 

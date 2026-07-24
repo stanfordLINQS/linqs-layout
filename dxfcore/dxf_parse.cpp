@@ -7,7 +7,9 @@
 //   * Only HEADER + ENTITIES sections; no BLOCKS/INSERT -> geometry is flat.
 //   * Geometry is 2D: POLYLINE (closed polygons of straight segments) made of
 //     VERTEX records terminated by SEQEND, plus CIRCLE (center + radius).
-//     No bulge (42), no Z (30), no per-vertex width.
+//     No Z (30), no per-vertex width. Bulge (42) IS handled: it marks the
+//     segment leaving that vertex as a circular arc, and is kept sparse and
+//     un-expanded for the renderer to tessellate per frame.
 //
 // Output is Structure-of-Arrays buffers handed to Python (zero-copy via ctypes):
 //   verts      : interleaved [x0,y0, x1,y1, ...]            (2 * n_vertices)
@@ -15,6 +17,8 @@
 //   poly_count : vertex count of polyline i                 (n_polylines)
 //   poly_layer : layer id of polyline i                     (n_polylines)
 //   poly_flags : DXF code-70 flags (bit0 = closed)          (n_polylines)
+//   bulge_idx  : vertex indices whose outgoing segment is an arc (n_bulges)
+//   bulge_val  : matching bulge factors, tan(sweep/4)         (n_bulges)
 //   circ       : interleaved [x,y,r, ...]                   (3 * n_circles)
 //   circ_layer : layer id of circle i                       (n_circles)
 //   layer_names: interned, in id order
@@ -167,6 +171,15 @@ struct DxfDoc {
     std::vector<int32_t> poly_count;
     std::vector<int32_t> poly_layer;
     std::vector<uint8_t> poly_flags;
+    // Bulge (code 42) on a VERTEX: the segment from that vertex to the next one
+    // is a circular arc, not a straight chord. Stored sparse (index + value)
+    // because it is rare -- a real 4.5 M-vertex file had 173 k of them, so a
+    // dense per-vertex array would be 18 MB of mostly zeros. Arcs are kept as
+    // arcs all the way to the GPU (see viewer/scene.py), never expanded into
+    // points here: baking a tolerance at load would both inflate the vertex
+    // count and still facet at high zoom.
+    std::vector<int64_t> bulge_idx;   // global vertex index carrying the bulge
+    std::vector<double>  bulge_val;   // tan(sweep/4); sign gives the arc's side
     std::vector<double>  circ;        // interleaved x,y,r
     std::vector<int32_t> circ_layer;
     std::vector<std::string> layer_names;
@@ -200,6 +213,8 @@ DXF_API DxfDoc* dxf_load(const char* path) {
     doc->poly_count.reserve(size / 1024);
     doc->poly_layer.reserve(size / 1024);
     doc->poly_flags.reserve(size / 1024);
+    doc->bulge_idx.reserve(size / 2048);
+    doc->bulge_val.reserve(size / 2048);
     doc->circ.reserve(size / 1024);
     doc->circ_layer.reserve(size / 3072);
 
@@ -209,12 +224,17 @@ DXF_API DxfDoc* dxf_load(const char* path) {
     Cur cur = NONE;
     int64_t cur_poly = -1;          // index into poly_* of the open polyline
     double tx = 0, ty = 0, tr = 0;  // pending vertex/circle coords
+    double tb = 0;                  // pending vertex bulge (code 42)
     int32_t tlayer = -1;            // pending circle layer
 
     // Flush the entity that just ended (its fields are fully read).
     auto finalize = [&]() {
         switch (cur) {
             case VERTEX:
+                if (tb != 0.0) {    // index of the vertex we are about to append
+                    doc->bulge_idx.push_back((int64_t)(doc->verts.size() / 2));
+                    doc->bulge_val.push_back(tb);
+                }
                 doc->verts.push_back(tx);
                 doc->verts.push_back(ty);
                 break;
@@ -258,7 +278,7 @@ DXF_API DxfDoc* dxf_load(const char* path) {
                     doc->poly_layer.push_back(-1);
                     doc->poly_flags.push_back(0);
                 } else if (cur == VERTEX) {
-                    tx = ty = 0;
+                    tx = ty = tb = 0;
                 } else if (cur == CIRCLE) {
                     tx = ty = tr = 0;
                     tlayer = -1;
@@ -297,6 +317,10 @@ DXF_API DxfDoc* dxf_load(const char* path) {
                 if (cur == CIRCLE) tr = parse_double(vstart, vend);
                 break;
             }
+            case 42: {
+                if (cur == VERTEX) tb = parse_double(vstart, vend);
+                break;
+            }
             default:
                 break;
         }
@@ -317,6 +341,9 @@ DXF_API const int64_t* dxf_poly_start(DxfDoc* d)      { return d->poly_start.dat
 DXF_API const int32_t* dxf_poly_count(DxfDoc* d)      { return d->poly_count.data(); }
 DXF_API const int32_t* dxf_poly_layer(DxfDoc* d)      { return d->poly_layer.data(); }
 DXF_API const uint8_t* dxf_poly_flags(DxfDoc* d)      { return d->poly_flags.data(); }
+DXF_API int64_t        dxf_num_bulges(DxfDoc* d)      { return (int64_t)d->bulge_idx.size(); }
+DXF_API const int64_t* dxf_bulge_idx(DxfDoc* d)       { return d->bulge_idx.data(); }
+DXF_API const double*  dxf_bulge_val(DxfDoc* d)       { return d->bulge_val.data(); }
 DXF_API const double*  dxf_circ(DxfDoc* d)            { return d->circ.data(); }
 DXF_API const int32_t* dxf_circ_layer(DxfDoc* d)      { return d->circ_layer.data(); }
 DXF_API const char*    dxf_layer_name(DxfDoc* d, int64_t i) {

@@ -57,7 +57,8 @@ def _load_lib() -> ctypes.CDLL:
     lib.dxf_free.restype = None
     lib.dxf_free.argtypes = [P]
 
-    for name in ("dxf_num_polylines", "dxf_num_vertices", "dxf_num_circles", "dxf_num_layers"):
+    for name in ("dxf_num_polylines", "dxf_num_vertices", "dxf_num_circles", "dxf_num_layers",
+                 "dxf_num_bulges"):
         getattr(lib, name).restype = ctypes.c_int64
         getattr(lib, name).argtypes = [P]
 
@@ -71,6 +72,10 @@ def _load_lib() -> ctypes.CDLL:
     lib.dxf_poly_layer.argtypes = [P]
     lib.dxf_poly_flags.restype = ctypes.POINTER(ctypes.c_uint8)
     lib.dxf_poly_flags.argtypes = [P]
+    lib.dxf_bulge_idx.restype = ctypes.POINTER(ctypes.c_int64)
+    lib.dxf_bulge_idx.argtypes = [P]
+    lib.dxf_bulge_val.restype = ctypes.POINTER(ctypes.c_double)
+    lib.dxf_bulge_val.argtypes = [P]
     lib.dxf_circ.restype = ctypes.POINTER(ctypes.c_double)
     lib.dxf_circ.argtypes = [P]
     lib.dxf_circ_layer.restype = ctypes.POINTER(ctypes.c_int32)
@@ -125,6 +130,13 @@ class DxfLayout:
         CSR-style offsets into ``verts`` for each polyline.
     poly_layer : (P,) int32        layer id of each polyline
     poly_flags : (P,) uint8        DXF code-70 flags (bit0 = closed)
+    bulge_idx : (B,) int64
+        Vertex indices (into ``verts``) whose *outgoing* segment is a circular
+        arc rather than a straight chord. Sparse: most files have none.
+    bulge_val : (B,) float64
+        Matching DXF bulge factors, ``tan(sweep_angle / 4)``. The sign selects
+        which side of the chord the arc bows to. Arcs are deliberately left
+        un-expanded here — see ``viewer.scene`` for the per-frame tessellation.
     circ : (C, 3) float64          [x, y, radius] of each circle
     circ_layer : (C,) int32        layer id of each circle
     layers : list[str]             layer names, indexed by layer id
@@ -143,12 +155,15 @@ class DxfLayout:
         n_vert = _LIB.dxf_num_vertices(handle)
         n_circ = _LIB.dxf_num_circles(handle)
         n_layer = _LIB.dxf_num_layers(handle)
+        n_bulge = _LIB.dxf_num_bulges(handle)
 
         self.verts = _view(_LIB.dxf_verts(handle), n_vert * 2, ctypes.c_double).reshape(-1, 2)
         self.poly_start = _view(_LIB.dxf_poly_start(handle), n_poly, ctypes.c_int64)
         self.poly_count = _view(_LIB.dxf_poly_count(handle), n_poly, ctypes.c_int32)
         self.poly_layer = _view(_LIB.dxf_poly_layer(handle), n_poly, ctypes.c_int32)
         self.poly_flags = _view(_LIB.dxf_poly_flags(handle), n_poly, ctypes.c_uint8)
+        self.bulge_idx = _view(_LIB.dxf_bulge_idx(handle), n_bulge, ctypes.c_int64)
+        self.bulge_val = _view(_LIB.dxf_bulge_val(handle), n_bulge, ctypes.c_double)
         self.circ = _view(_LIB.dxf_circ(handle), n_circ * 3, ctypes.c_double).reshape(-1, 3)
         self.circ_layer = _view(_LIB.dxf_circ_layer(handle), n_circ, ctypes.c_int32)
         self.layers = [
@@ -161,7 +176,7 @@ class DxfLayout:
         if h:
             # Drop array views first; they alias C memory we are about to free.
             for a in ("verts", "poly_start", "poly_count", "poly_layer",
-                      "poly_flags", "circ", "circ_layer"):
+                      "poly_flags", "bulge_idx", "bulge_val", "circ", "circ_layer"):
                 setattr(self, a, None)
             _LIB.dxf_free(h)
             self._handle = None
